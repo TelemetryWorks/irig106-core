@@ -1,0 +1,7 @@
+[package]
+name = "irig106-core"
+version = "0.0.1"
+edition = "2024"
+description = "Blazing-fast, deterministic structural traversal and packet parsing for IRIG 106 Chapter 10 streams."
+repository = "https://github.com/TelemetryWorks/irig106-core"
+license = "Apache-2.0"
