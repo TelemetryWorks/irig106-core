@@ -3,8 +3,8 @@
 Chapter 10 packet finding and structural checking for the TelemetryWorks IRIG 106
 ecosystem. Unreleased development toward 0.1 currently provides a primary
 header/checksum parser and the promoted bounded reader under
-`crates/irig106-core`. Typed completion/recovery-cap refinements remain slice 4;
-the manifest remains 0.0.1 and no new version is published.
+`crates/irig106-core`, with typed completion/errors and optional caller recovery
+caps (default None). The manifest remains 0.0.1; no new version is published.
 
 The virtual workspace uses edition 2024, MSRV 1.85 and Apache-2.0. It currently
 has one library. Published `irig106-types` 0.1 (defaults disabled) is its sole

@@ -1,6 +1,6 @@
 //! Seed transport regressions; partial L3-IO-002/CAP-002/REC-003/END-004.
 //! Copied/adapted from time 5899806 (S16b / PR66); no complete-reader credit.
-use irig106_core::{Event, HeaderError, PacketReader, ReaderLimits, TailKind};
+use irig106_core::{Event, HeaderError, PacketReader, ReaderLimits, Recovery, TailKind};
 use std::io::{self, Read};
 
 // 106-24R1 §11.2.1.1, 24-byte primary header, little-endian
@@ -28,6 +28,7 @@ fn reader(bytes: &[u8]) -> PacketReader<&[u8]> {
         ReaderLimits {
             buffer_bytes: 32,
             capture_bytes: 16,
+            recovery_bytes: None,
         },
     )
     .unwrap()
@@ -57,6 +58,7 @@ fn bounded_reader_crosses_small_buffers_without_exposing_filler() {
         ReaderLimits {
             buffer_bytes: 32,
             capture_bytes: 16,
+            recovery_bytes: None,
         },
     )
     .unwrap();
@@ -95,7 +97,8 @@ fn secondary_bit_and_capture_cap_are_explicit() {
             &[][..],
             ReaderLimits {
                 buffer_bytes: 0,
-                capture_bytes: 0
+                capture_bytes: 0,
+                recovery_bytes: None,
             }
         )
         .is_err()
@@ -117,7 +120,8 @@ fn framing_recovery_and_final_tails_remain_distinct() {
         Some(Event::Tail {
             kind: TailKind::Unsynchronized,
             bytes: 512,
-            offset: 57
+            offset: 57,
+            ..
         })
     ));
     assert!(r.next_packet(|_| 0).unwrap().is_none());
@@ -129,8 +133,11 @@ fn framing_recovery_and_final_tails_remain_distinct() {
         (13, TailKind::PartialHeader),
         (26, TailKind::TruncatedPacket),
     ] {
+        let bytes = [good.clone(), good[..cut].to_vec()].concat();
+        let mut r = reader(&bytes);
+        r.next_packet(|_| 4).unwrap();
         assert!(
-            matches!(reader(&good[..cut]).next_packet(|_| 4).unwrap(), Some(Event::Tail { kind: k, bytes: n, .. }) if k == kind && n == cut as u64)
+            matches!(r.next_packet(|_| 4).unwrap(), Some(Event::Tail { offset: 28, kind: k, bytes: n, recovery: None }) if k == kind && n == cut as u64)
         );
     }
     for (flags, length) in [(0, 0u32), (0, 25), (0x80, 24)] {
@@ -221,6 +228,7 @@ fn interrupted_reads_retry_but_real_errors_terminate() {
         ReaderLimits {
             buffer_bytes: 32,
             capture_bytes: 2,
+            recovery_bytes: None,
         },
     )
     .unwrap();
@@ -254,7 +262,7 @@ fn default_recovery_preserves_padding_larger_than_one_mib() {
         Some(Event::Packet(_))
     ));
     assert!(
-        matches!(r.next_packet(|_| 0).unwrap(), Some(Event::Tail { offset: 28, bytes, kind: TailKind::Unsynchronized }) if bytes == padding as u64)
+        matches!(r.next_packet(|_| 0).unwrap(), Some(Event::Tail { offset: 28, bytes, kind: TailKind::Unsynchronized, .. }) if bytes == padding as u64)
     );
     assert!(r.next_packet(|_| 0).unwrap().is_none());
 }
@@ -348,6 +356,10 @@ fn truncated_packet_after_recovery_reports_packet_offset() {
                 offset: 35,
                 bytes: cut as u64,
                 kind: TailKind::TruncatedPacket,
+                recovery: Some(Recovery {
+                    start_offset: 28,
+                    scanned_bytes: 7
+                }),
             })
         );
         assert_eq!(r.position(), 35 + cut as u64);

@@ -3,14 +3,16 @@
 **Implemented in slice 2:** `Header::parse(&[u8])`, `primary_checksum(&[u8; 24])`,
 `HeaderError`, `PRIMARY_HEADER_LEN` and re-exported shared `Rtc`. `Header` stores
 immutable primary bytes and exposes accessors named below (`channel()`, etc.).
-**Slice 3** also exports PacketReader, ReaderLimits, Packet, Event and TailKind.
-The sketch below remains the target contract: the staged reader currently uses
-`std::io::Result`, and ReaderLimits has only buffer_bytes/capture_bytes.
-Typed completion/errors, optional recovery caps and terminal scanned evidence
-are slice 4. Seed empty input returns None; a first truncated frame returns Tail.
-Neither proves valid input: callers must require a complete Packet event (as
-time-cli does) until slice 4 supplies NoCompletePacket. Behavior follows
-[requirements](requirements.md), not this sketch alone.
+**Slice 4** returns `Result<_, Error>` from reader construction/iteration.
+`Error.reason: ErrorKind` distinguishes I/O, HeaderError, NoCompletePacket,
+RecoveryLimit, invalid buffer/capture bounds, allocation and offset overflow.
+Errors retain consumed `position`, optional `recovery`, and their original source.
+`kind()`/`get_ref()` retain broad seed classifications and HeaderError downcasts.
+NoCompletePacket carries optional `Tail` metadata; Event::Tail adds recovery.
+ReaderLimits literals now need recovery_bytes (or `..Default::default()`).
+All errors/tails terminate iteration; repeated calls yield None. This is framing
+completion, not full packet/recording conformance. Behavior follows
+[requirements](requirements.md).
 
 ```text
 ReaderLimits {
@@ -50,27 +52,33 @@ the caller's responsibility. No packet history, report rows or diagnostic string
 
 Default recovery continues to EOF. An incident starts at an expected packet
 offset that fails sync/checksum, including leading junk. Scanned-byte evidence
-counts rejected byte positions skipped from that offset; successful recovery
+counts candidate displacement reached from that offset; successful recovery
 therefore reports `packet.offset - incident_start`. The fixed 24-byte validation
 lookahead is separate from this displacement. Terminal tails also report their
-full consumed byte count; recovery evidence is not lost on errors or EOF.
+full consumed byte count; recovery evidence is not lost on errors or EOF. For
+27 unsynchronized bytes, displacement is 3 and the tail count is 27. A recovered
+truncated packet retains its packet offset separately from recovery.start_offset.
 
 `Some(N)` permits a candidate at displacement N, including N=0; a candidate at
 N+1 exceeds the cap and returns typed `RecoveryLimit` with start/scanned/limit
 evidence. Never silently stop, emit EOF or call unsearched bytes padding on cap
 exhaustion. Default None permits arbitrarily large block padding with fixed RAM.
-Tests must isolate exact cap edges from malformed lengths and bad checksums.
+A rejected candidate at the cap returns RecoveryLimit before another read, even
+if that read would discover EOF. Only observed EOF can establish a padding tail.
+The cap resets per incident. Exact-boundary/zero-cap tests isolate these rules.
 
 Checksum-qualified impossible lengths are fatal framing, preserving the seed
 policy. Bad checksums instead trigger recovery, even at an expected offset.
 Once a header declares a structurally possible packet, a cut body is terminal:
 do not rescan sync-looking bytes swallowed within it; report consumed tail bytes.
 
-EOF before any complete packet yields `NoCompletePacket`, retaining available
+Observed EOF before any complete packet yields `NoCompletePacket`, retaining available
 tail/recovery evidence. A header alone does not establish the stream. After a
 complete packet, partial final headers/truncated packets and EOF padding yield
 typed tail events, preserving all prior packets. Errors and tails terminate the
-reader; subsequent calls return None. Real I/O errors retain their source.
+reader; subsequent calls return None. I/O, structural and caller-limit failures
+retain their own typed reasons even before the first complete packet; they are
+never masked by NoCompletePacket. Real I/O errors retain their source.
 
 Core never exits the process or assigns semantic finding severities. Consumers
 map no-complete/fatal input to input 3; recovered sync and established-stream cut

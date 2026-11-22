@@ -1,0 +1,105 @@
+//! Typed reader failures and bounded terminal evidence.
+use crate::{HeaderError, TailKind};
+use std::{collections::TryReserveError, error::Error as StdError, fmt, io};
+
+/// One recovery incident; the 24-byte validation window is not charged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Recovery {
+    /// Expected packet offset where sync/checksum search began.
+    pub start_offset: u64,
+    /// Candidate displacement reached, equal to skipped bytes on success.
+    pub scanned_bytes: u64,
+}
+
+/// Terminal bytes preserved when EOF occurs before any complete packet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tail {
+    /// Partial header/packet or unsynchronized region start.
+    pub offset: u64,
+    /// Consumed bytes from that start, independent of recovery displacement.
+    pub bytes: u64,
+    /// How input ended.
+    pub kind: TailKind,
+}
+
+/// Typed failure reason; EOF completion does not mask I/O or structural errors.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ErrorKind {
+    /// Original operational read failure.
+    Io(io::Error),
+    /// Checksum-qualified impossible primary framing.
+    Header(HeaderError),
+    /// EOF without a single completely consumed frame.
+    NoCompletePacket {
+        /// Available tail evidence, absent for empty input.
+        tail: Option<Tail>,
+    },
+    /// Caller's inclusive candidate-displacement budget was exhausted.
+    RecoveryLimit {
+        /// Explicit caller cap; never a default limit.
+        limit: u64,
+    },
+    /// Zero buffered-input capacity.
+    InvalidBuffer,
+    /// Requested DATA prefix exceeds the caller's capture bound.
+    CaptureLimit {
+        /// Requested size after clamping to Data Length.
+        requested: usize,
+        /// Caller capture bound.
+        limit: usize,
+    },
+    /// Bounded DATA capture allocation failed.
+    Allocation(TryReserveError),
+    /// Advancing the consumed byte offset would exceed u64.
+    OffsetOverflow,
+}
+
+impl From<io::Error> for ErrorKind {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+/// Terminal reader failure with exact consumed position and recovery context.
+#[derive(Debug)]
+pub struct Error {
+    /// Typed cause; no error-message matching is required.
+    pub reason: ErrorKind,
+    /// Consumed byte position, excluding buffered read-ahead.
+    pub position: u64,
+    /// Current recovery incident, including on I/O/structural failure or EOF.
+    pub recovery: Option<Recovery>,
+}
+impl Error {
+    /// Broad I/O classification retained for callers of the promoted seed.
+    pub fn kind(&self) -> io::ErrorKind {
+        match &self.reason {
+            ErrorKind::Io(error) => error.kind(),
+            ErrorKind::InvalidBuffer | ErrorKind::CaptureLimit { .. } => {
+                io::ErrorKind::InvalidInput
+            }
+            ErrorKind::Allocation(_) => io::ErrorKind::Other,
+            _ => io::ErrorKind::InvalidData,
+        }
+    }
+    /// Underlying typed header, I/O or allocation error, when present.
+    pub fn get_ref(&self) -> Option<&(dyn StdError + Send + Sync + 'static)> {
+        match &self.reason {
+            ErrorKind::Io(error) => Some(error),
+            ErrorKind::Header(error) => Some(error),
+            ErrorKind::Allocation(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "packet reader at {}: {:?}", self.position, self.reason)
+    }
+}
+impl StdError for Error {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        self.get_ref().map(|error| error as _)
+    }
+}
