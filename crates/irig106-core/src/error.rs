@@ -3,6 +3,10 @@ use crate::{HeaderError, TailKind};
 use std::{collections::TryReserveError, error::Error as StdError, fmt, io};
 
 /// One recovery incident; the 24-byte validation window is not charged.
+/// ```compile_fail,E0639
+/// use irig106_core::Recovery;
+/// fn rebuild(value: Recovery) { let _ = Recovery { ..value }; }
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Recovery {
     /// Expected packet offset where sync/checksum search began.
@@ -12,6 +16,10 @@ pub struct Recovery {
 }
 
 /// Terminal bytes preserved when EOF occurs before any complete packet.
+/// ```compile_fail,E0639
+/// use irig106_core::Tail;
+/// fn rebuild(value: Tail) { let _ = Tail { ..value }; }
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Tail {
     /// Partial header/packet or unsynchronized region start.
@@ -62,6 +70,10 @@ impl From<io::Error> for ErrorKind {
 }
 
 /// Terminal reader failure with exact consumed position and recovery context.
+/// ```compile_fail,E0639
+/// use irig106_core::Error;
+/// fn rebuild(value: Error) { let _ = Error { ..value }; }
+/// ```
 #[derive(Debug)]
 pub struct Error {
     /// Typed cause; no error-message matching is required.

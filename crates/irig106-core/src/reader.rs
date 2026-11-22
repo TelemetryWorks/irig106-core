@@ -4,6 +4,10 @@ use crate::{Error, ErrorKind, Header, HeaderError, Recovery, Tail};
 use std::io::{self, BufRead, BufReader, Read};
 
 /// Caller-owned transport bounds; no allocation follows Packet Length.
+/// ```compile_fail,E0639
+/// use irig106_core::ReaderLimits;
+/// fn rebuild(value: ReaderLimits) { let _ = ReaderLimits { ..value }; }
+/// ```
 #[derive(Debug, Clone, Copy)]
 pub struct ReaderLimits {
     /// Fixed buffered-input capacity; must be nonzero.
@@ -55,6 +59,12 @@ pub enum Event {
     /// A completely consumed frame, with optional bounded DATA capture.
     Packet(Packet),
     /// Terminal bytes that did not produce a complete frame.
+    /// ```compile_fail,E0638
+    /// use irig106_core::Event;
+    /// fn closed(event: Event) {
+    ///     if let Event::Tail { offset: _, bytes: _, kind: _, recovery: _ } = event {}
+    /// }
+    /// ```
     Tail {
         /// Start of the tail.
         offset: u64,
