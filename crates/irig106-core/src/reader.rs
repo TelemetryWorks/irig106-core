@@ -1,6 +1,6 @@
 //! Promoted time S16b transport; partial L3-IO-002/CAP-002/REC-003/END-004.
-//! No payload meaning. Typed completion/cap refinements are slice 4.
-use crate::{Header, HeaderError};
+//! No payload meaning; completion and recovery evidence are structure only.
+use crate::{Error, ErrorKind, Header, HeaderError, Recovery, Tail};
 use std::io::{self, BufRead, BufReader, Read};
 
 /// Caller-owned transport bounds; no allocation follows Packet Length.
@@ -10,12 +10,15 @@ pub struct ReaderLimits {
     pub buffer_bytes: usize,
     /// Maximum DATA prefix retained per returned packet.
     pub capture_bytes: usize,
+    /// Optional per-incident candidate-displacement cap; None searches to EOF.
+    pub recovery_bytes: Option<u64>,
 }
 impl Default for ReaderLimits {
     fn default() -> Self {
         Self {
             buffer_bytes: 8192,
             capture_bytes: 65536,
+            recovery_bytes: None,
         }
     }
 }
@@ -59,6 +62,8 @@ pub enum Event {
         bytes: u64,
         /// Reason this tail was emitted.
         kind: TailKind,
+        /// Recovery displacement, separate from consumed tail bytes.
+        recovery: Option<Recovery>,
     },
 }
 /// Constant transport space: buffer + 24-byte window + caller-bounded capture.
@@ -72,18 +77,17 @@ pub struct PacketReader<R> {
     position: u64,
     established: bool,
     done: bool,
-}
-fn invalid(message: &'static str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message)
+    recovery: Option<Recovery>,
 }
 impl<R: Read> PacketReader<R> {
-    /// Construct a reader with bounded buffer/capture and uncapped sync search.
-    pub fn new(input: R, limits: ReaderLimits) -> io::Result<Self> {
+    /// Construct a reader with bounded buffer/capture and optional explicit sync-search cap.
+    pub fn new(input: R, limits: ReaderLimits) -> Result<Self, Error> {
         if limits.buffer_bytes == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "zero reader buffer",
-            ));
+            return Err(Error {
+                reason: ErrorKind::InvalidBuffer,
+                position: 0,
+                recovery: None,
+            });
         }
         Ok(Self {
             input: BufReader::with_capacity(limits.buffer_bytes, input),
@@ -91,6 +95,7 @@ impl<R: Read> PacketReader<R> {
             position: 0,
             established: false,
             done: false,
+            recovery: None,
         })
     }
     /// Consumed byte offset, excluding buffered read-ahead.
@@ -101,14 +106,14 @@ impl<R: Read> PacketReader<R> {
     pub fn into_inner(self) -> R {
         self.input.into_inner()
     }
-    fn advance(&mut self, n: usize) -> io::Result<()> {
+    fn advance(&mut self, n: usize) -> Result<(), ErrorKind> {
         self.position = self
             .position
             .checked_add(n as u64)
-            .ok_or_else(|| invalid("file offset overflow"))?;
+            .ok_or(ErrorKind::OffsetOverflow)?;
         Ok(())
     }
-    fn read_counted(&mut self, out: &mut [u8]) -> io::Result<usize> {
+    fn read_counted(&mut self, out: &mut [u8]) -> Result<usize, ErrorKind> {
         let mut total = 0;
         while total < out.len() {
             match self.input.read(&mut out[total..]) {
@@ -118,17 +123,17 @@ impl<R: Read> PacketReader<R> {
                     total += n;
                 }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e),
+                Err(e) => return Err(e.into()),
             }
         }
         Ok(total)
     }
-    fn drain(&mut self, mut n: u64) -> io::Result<bool> {
+    fn drain(&mut self, mut n: u64) -> Result<bool, ErrorKind> {
         while n > 0 {
             let available = match self.input.fill_buf() {
                 Ok(b) => b.len(),
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e),
+                Err(e) => return Err(e.into()),
             };
             if available == 0 {
                 return Ok(false);
@@ -140,70 +145,100 @@ impl<R: Read> PacketReader<R> {
         }
         Ok(true)
     }
-    fn tail(&mut self, offset: u64, kind: TailKind) -> Event {
+    fn tail(&mut self, offset: u64, kind: TailKind) -> Result<Option<Event>, ErrorKind> {
         self.done = true;
-        Event::Tail {
-            offset,
-            bytes: self.position - offset,
-            kind,
+        let bytes = self.position - offset;
+        if !self.established {
+            return Err(ErrorKind::NoCompletePacket {
+                tail: Some(Tail {
+                    offset,
+                    bytes,
+                    kind,
+                }),
+            });
         }
+        Ok(Some(Event::Tail {
+            offset,
+            bytes,
+            kind,
+            recovery: self.recovery,
+        }))
     }
     /// Capture at most this many DATA bytes, selected after header validation.
     /// Requests are clamped to Data Length, then checked against `capture_bytes`.
-    /// Invalid framing/no established sync is InvalidData; exceeding the caller's
-    /// capture cap is InvalidInput. Read errors retain their original kind.
+    /// EOF without a complete packet yields NoCompletePacket. Other failures
+    /// preserve typed causes; every error/tail is terminal, followed by None.
     pub fn next_packet(
         &mut self,
         capture: impl FnOnce(&Header) -> usize,
-    ) -> io::Result<Option<Event>> {
+    ) -> Result<Option<Event>, Error> {
         if self.done {
             return Ok(None);
         }
-        let result = self.next_inner(capture);
-        if result.is_err() {
+        self.recovery = None;
+        self.next_inner(capture).map_err(|reason| {
             self.done = true;
-        }
-        result
+            Error {
+                reason,
+                position: self.position,
+                recovery: self.recovery,
+            }
+        })
     }
-    fn next_inner(&mut self, capture: impl FnOnce(&Header) -> usize) -> io::Result<Option<Event>> {
+    fn next_inner(
+        &mut self,
+        capture: impl FnOnce(&Header) -> usize,
+    ) -> Result<Option<Event>, ErrorKind> {
         let start = self.position;
         let mut b = [0; 24];
         match self.read_counted(&mut b)? {
             0 => {
                 self.done = true;
-                return Ok(None);
+                return if self.established {
+                    Ok(None)
+                } else {
+                    Err(ErrorKind::NoCompletePacket { tail: None })
+                };
             }
             24 => (),
-            _ => return Ok(Some(self.tail(start, TailKind::PartialHeader))),
+            _ => return self.tail(start, TailKind::PartialHeader),
         }
         // Reuse the primary parser: only sync/checksum failures search forward.
         let header = loop {
             match Header::parse(&b) {
                 Ok(header) => break header,
                 Err(HeaderError::InvalidSync { .. } | HeaderError::ChecksumMismatch { .. }) => (),
-                Err(error) => return Err(io::Error::new(io::ErrorKind::InvalidData, error)),
+                Err(error) => return Err(ErrorKind::Header(error)),
+            }
+            let recovery = self.recovery.get_or_insert(Recovery {
+                start_offset: start,
+                scanned_bytes: 0,
+            });
+            if let Some(limit) = self.limits.recovery_bytes {
+                if recovery.scanned_bytes >= limit {
+                    return Err(ErrorKind::RecoveryLimit { limit });
+                }
             }
             b.copy_within(1.., 0);
             if self.read_counted(&mut b[23..])? == 0 {
-                return if self.established {
-                    Ok(Some(self.tail(start, TailKind::Unsynchronized)))
-                } else {
-                    Err(invalid("no valid Chapter 10 sync/header"))
-                };
+                return self.tail(start, TailKind::Unsynchronized);
+            }
+            if let Some(recovery) = &mut self.recovery {
+                recovery.scanned_bytes += 1;
             }
         };
         let offset = self.position - 24;
         let wanted = capture(&header).min(header.data_length() as usize);
         if wanted > self.limits.capture_bytes {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "data capture exceeds caller cap",
-            ));
+            return Err(ErrorKind::CaptureLimit {
+                requested: wanted,
+                limit: self.limits.capture_bytes,
+            });
         }
         let secondary = if header.has_secondary_header() {
             let mut raw = [0; 12];
             if self.read_counted(&mut raw)? != 12 {
-                return Ok(Some(self.tail(offset, TailKind::TruncatedPacket)));
+                return self.tail(offset, TailKind::TruncatedPacket);
             }
             Some(raw)
         } else {
@@ -212,13 +247,13 @@ impl<R: Read> PacketReader<R> {
         let mut body_prefix = Vec::new();
         body_prefix
             .try_reserve_exact(wanted)
-            .map_err(|_| io::Error::other("data capture allocation failed"))?;
+            .map_err(ErrorKind::Allocation)?;
         body_prefix.resize(wanted, 0);
         if self.read_counted(&mut body_prefix)? != wanted
             || !self
                 .drain(u64::from(header.packet_length() - header.header_length()) - wanted as u64)?
         {
-            return Ok(Some(self.tail(offset, TailKind::TruncatedPacket)));
+            return self.tail(offset, TailKind::TruncatedPacket);
         }
         self.established = true;
         Ok(Some(Event::Packet(Packet {
@@ -228,5 +263,17 @@ impl<R: Read> PacketReader<R> {
             body_prefix,
             recovered_bytes: offset - start,
         })))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn offset_overflow_is_typed_without_wrapping() {
+        let mut reader = PacketReader::new(&[][..], ReaderLimits::default()).unwrap();
+        reader.position = u64::MAX;
+        assert!(matches!(reader.advance(1), Err(ErrorKind::OffsetOverflow)));
+        assert_eq!(reader.position(), u64::MAX);
     }
 }

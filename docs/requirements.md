@@ -2,12 +2,12 @@
 
 Owner approved 2026-11-22; recovery correction from the coordinator is binding.
 Slice 2 supplies primary-header/checksum/basic-length tests and shared `Rtc`.
-L3-HDR-001 and L3-LEN-001 have partial primitive coverage; stream offset overflow
-and complete-input classification remain unverified. Slice 3 adds buffered
-transport/capture and expected-offset checksum-recovery evidence. Completion/cap
-refinements, secondary/trailer and inspection remain planned. See the
-[slice 2](verification-s02.md) and [slice 3](verification-s03.md) evidence;
-no whole-reader verification is claimed.
+Slice 4 adds typed completion, optional recovery caps and terminal evidence,
+including checked offset-overflow unit coverage. See [slice 2](verification-s02.md),
+[slice 3](verification-s03.md) and [slice 4](verification-s04.md) clause evidence.
+Secondary/trailer and inspection requirements remain planned; allocation-failure
+handling is typed but no process-OOM test is claimed. No whole-recording or
+whole-standard conformance is asserted.
 
 Sources: **S** = 106-24R1 Chapter 11 §§11.2.1.1–11.2.1.2, as recorded in
 [time's reviewed evidence](provenance.md); **O** = owner/coordinator policy

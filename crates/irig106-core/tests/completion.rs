@@ -33,6 +33,13 @@ fn reader(b: &[u8], limit: Option<u64>) -> PacketReader<&[u8]> {
     .unwrap()
 }
 
+fn recovered(start_offset: u64, scanned_bytes: u64) -> Option<Recovery> {
+    Some(Recovery {
+        start_offset,
+        scanned_bytes,
+    })
+}
+
 #[test]
 fn empty_and_every_first_packet_cut_are_no_complete_packet() {
     for flags in [0, 0x80] {
@@ -108,13 +115,7 @@ fn recovery_cap_is_inclusive_and_optional() {
     let mut r = reader(&b, Some(6));
     let e = r.next_packet(|_| 0).unwrap_err();
     assert!(matches!(e.reason, ErrorKind::RecoveryLimit { limit: 6 }));
-    assert_eq!(
-        e.recovery,
-        Some(Recovery {
-            start_offset: 0,
-            scanned_bytes: 6
-        })
-    );
+    assert_eq!(e.recovery, recovered(0, 6));
     assert_eq!(e.position, 30); // 24-byte lookahead plus six allowed shifts.
     assert!(r.next_packet(|_| 0).unwrap().is_none());
     assert!(matches!(
@@ -143,13 +144,7 @@ fn recovery_budget_resets_per_incident_and_eof_keeps_evidence() {
     let junk = [0xFF; 27];
     let e = reader(&junk, None).next_packet(|_| 0).unwrap_err();
     assert!(matches!(e.reason, ErrorKind::NoCompletePacket { .. }));
-    assert_eq!(
-        e.recovery,
-        Some(Recovery {
-            start_offset: 0,
-            scanned_bytes: 3
-        })
-    );
+    assert_eq!(e.recovery, recovered(0, 3));
     let b = [packet(0, &[1; 4]), junk.to_vec()].concat();
     let mut r = reader(&b, None);
     r.next_packet(|_| 0).unwrap();
@@ -159,10 +154,7 @@ fn recovery_budget_resets_per_incident_and_eof_keeps_evidence() {
             offset: 28,
             bytes: 27,
             kind: TailKind::Unsynchronized,
-            recovery: Some(Recovery {
-                start_offset: 28,
-                scanned_bytes: 3
-            }),
+            recovery: recovered(28, 3),
         })
     );
 }
@@ -180,12 +172,12 @@ fn structural_and_io_failures_keep_typed_causes_and_recovery() {
         e.reason,
         ErrorKind::Header(HeaderError::UnalignedPacket { length: 30 })
     ));
-    assert_eq!(
-        e.recovery,
-        Some(Recovery {
-            start_offset: 28,
-            scanned_bytes: 7
-        })
+    assert_eq!(e.recovery, recovered(28, 7));
+    assert!(
+        std::error::Error::source(&e)
+            .unwrap()
+            .downcast_ref::<HeaderError>()
+            .is_some()
     );
     struct FailAtEnd<'a>(&'a [u8]);
     impl Read for FailAtEnd<'_> {
@@ -204,12 +196,14 @@ fn structural_and_io_failures_keep_typed_causes_and_recovery() {
     assert!(
         matches!(&e.reason, ErrorKind::Io(source) if source.kind() == io::ErrorKind::PermissionDenied)
     );
+    assert_eq!(e.recovery, recovered(28, 3));
     assert_eq!(
-        e.recovery,
-        Some(Recovery {
-            start_offset: 28,
-            scanned_bytes: 3
-        })
+        std::error::Error::source(&e)
+            .unwrap()
+            .downcast_ref::<io::Error>()
+            .unwrap()
+            .kind(),
+        io::ErrorKind::PermissionDenied
     );
     assert!(r.next_packet(|_| 0).unwrap().is_none());
 }
@@ -231,5 +225,39 @@ fn claimed_truncated_body_is_not_rescanned_for_nested_sync() {
             recovery: None,
         })
     );
+    assert!(r.next_packet(|_| 0).unwrap().is_none());
+}
+
+#[test]
+fn caller_limit_errors_are_typed_and_do_not_become_no_complete_packet() {
+    let e = PacketReader::new(
+        &[][..],
+        ReaderLimits {
+            buffer_bytes: 0,
+            ..ReaderLimits::default()
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(e.reason, ErrorKind::InvalidBuffer));
+    assert_eq!((e.position, e.recovery), (0, None));
+    let b = [vec![0xFF; 7], packet(0, &[1; 4])].concat();
+    let mut r = PacketReader::new(
+        &b[..],
+        ReaderLimits {
+            capture_bytes: 3,
+            ..ReaderLimits::default()
+        },
+    )
+    .unwrap();
+    let e = r.next_packet(|_| usize::MAX).unwrap_err(); // Clamp to DATA4 first.
+    assert!(matches!(
+        e.reason,
+        ErrorKind::CaptureLimit {
+            requested: 4,
+            limit: 3
+        }
+    ));
+    assert_eq!(e.recovery, recovered(0, 7));
+    assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
     assert!(r.next_packet(|_| 0).unwrap().is_none());
 }
