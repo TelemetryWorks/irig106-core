@@ -177,3 +177,12 @@ fn primary_parse_does_not_require_body_or_read_following_bytes() {
         [1, 2, 3, 4, 5, 6]
     );
 }
+
+#[test]
+fn all_four_length_bytes_survive_field_access() {
+    // Unlike the proposed 0x04030208 length, 0x04030228 leaves room for the
+    // 24-byte header plus DATA. Header-only vector, not a conforming packet.
+    let h = Header::parse(&packed(0x0403_0228, 0x0403_0201, 0)).unwrap();
+    assert_eq!(h.packet_length(), 0x0403_0228);
+    assert_eq!(h.data_length(), 0x0403_0201);
+}
