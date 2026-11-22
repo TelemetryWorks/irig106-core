@@ -5,3 +5,12 @@ version = 4
 [[package]]
 name = "irig106-core"
 version = "0.0.1"
+dependencies = [
+ "irig106-types",
+]
+
+[[package]]
+name = "irig106-types"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f5ddd5baf4fbc4fa5579bd739561274bc5fc9cc36ba50d610b0442cc0635420"

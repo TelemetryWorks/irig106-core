@@ -8,3 +8,6 @@ repository.workspace = true
 description = "Structural traversal and packet parsing for IRIG 106 Chapter 10 streams."
 readme = "README.md"
 publish = ["crates-io"]
+
+[dependencies]
+irig106-types = { version = "0.1", default-features = false }

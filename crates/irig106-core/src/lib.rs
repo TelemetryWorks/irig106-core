@@ -1,14 +1,13 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! Structural parsing for IRIG 106 Chapter 10 recordings.
+//!
+//! Currently exposes primary-header parsing only, using the 106-24R1 Chapter 11
+//! layout. Parsing a header does not establish a complete packet or recording.
+//! Streaming, recovery and secondary/trailer checks are subsequent slices.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#![forbid(unsafe_code)]
+#![deny(missing_docs)]
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+mod header;
+
+pub use header::{Header, HeaderError, PRIMARY_HEADER_LEN, primary_checksum};
+pub use irig106_types::Rtc;

@@ -1,8 +1,10 @@
 # Proposed 0.1 API contract
 
-**Design only: none of these reader APIs exists in slice 1.** The package still
-exports only template `add`. Names may be refined in reviewed implementation
-slices; behavior follows [requirements](requirements.md), not this sketch alone.
+**Implemented in slice 2:** `Header::parse(&[u8])`, `primary_checksum(&[u8; 24])`,
+`HeaderError`, `PRIMARY_HEADER_LEN` and re-exported shared `Rtc`. `Header` stores
+immutable primary bytes and exposes accessors named below (`channel()`, etc.).
+**The following streaming APIs remain design only.** Behavior follows
+[requirements](requirements.md), not this sketch alone.
 
 ```text
 ReaderLimits {
@@ -18,14 +20,18 @@ Event::Tail { offset, bytes, kind, recovery }
 ```
 
 The synchronous std-first adapter sits above pure header/checksum functions.
-The sole planned dependency is published irig106-types 0.1, default features off;
+The sole dependency is published irig106-types 0.1, default features off;
 no time, TMATS, decode or retired-reader dependency. No supported no_std/alloc
 configuration in 0.1; keep parsing and I/O separate for later consumers.
 
 `Header` retains channel, Packet/Data Length, data-type version, sequence, flags,
 data type and raw RTC bytes; a shared `Rtc` accessor avoids a competing counter.
 Bit 7 selects twelve secondary bytes; bits 3–2 remain raw format evidence. No
-recording edition is inferred. Routing codes unknown to core remain observable.
+recording edition is inferred. Routing codes unknown to core remain observable. `Header::parse` validates only
+sync, checksum, minimum/aligned Packet Length and DATA containment. It accepts
+a primary-only slice even when secondary/body bytes are declared. It does not
+check trailer space, packet maximums, the nonempty-DATA rule or recording-wide
+channel/version constraints; success is basic framing evidence, not conformance.
 
 `Packet` owns offset, header, raw secondary bytes, bounded `body_prefix` (DATA
 only), capture-completeness/range accessors and recovery/integrity evidence.
