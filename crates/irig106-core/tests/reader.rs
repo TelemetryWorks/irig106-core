@@ -25,11 +25,10 @@ fn packet(flags: u8, data: &[u8]) -> Vec<u8> {
 fn reader(bytes: &[u8]) -> PacketReader<&[u8]> {
     PacketReader::new(
         bytes,
-        ReaderLimits {
-            buffer_bytes: 32,
-            capture_bytes: 16,
-            recovery_bytes: None,
-        },
+        ReaderLimits::new()
+            .with_buffer_bytes(32)
+            .with_capture_bytes(16)
+            .with_recovery_bytes(None),
     )
     .unwrap()
 }
@@ -55,11 +54,10 @@ fn bounded_reader_crosses_small_buffers_without_exposing_filler() {
     };
     let mut r = PacketReader::new(
         input,
-        ReaderLimits {
-            buffer_bytes: 32,
-            capture_bytes: 16,
-            recovery_bytes: None,
-        },
+        ReaderLimits::new()
+            .with_buffer_bytes(32)
+            .with_capture_bytes(16)
+            .with_recovery_bytes(None),
     )
     .unwrap();
     for i in 0..100 {
@@ -95,11 +93,10 @@ fn secondary_bit_and_capture_cap_are_explicit() {
     assert!(
         PacketReader::new(
             &[][..],
-            ReaderLimits {
-                buffer_bytes: 0,
-                capture_bytes: 0,
-                recovery_bytes: None,
-            }
+            ReaderLimits::new()
+                .with_buffer_bytes(0)
+                .with_capture_bytes(0)
+                .with_recovery_bytes(None)
         )
         .is_err()
     );
@@ -137,7 +134,7 @@ fn framing_recovery_and_final_tails_remain_distinct() {
         let mut r = reader(&bytes);
         r.next_packet(|_| 4).unwrap();
         assert!(
-            matches!(r.next_packet(|_| 4).unwrap(), Some(Event::Tail { offset: 28, kind: k, bytes: n, recovery: None }) if k == kind && n == cut as u64)
+            matches!(r.next_packet(|_| 4).unwrap(), Some(Event::Tail { offset: 28, kind: k, bytes: n, recovery: None, .. }) if k == kind && n == cut as u64)
         );
     }
     for (flags, length) in [(0, 0u32), (0, 25), (0x80, 24)] {
@@ -225,11 +222,10 @@ fn interrupted_reads_retry_but_real_errors_terminate() {
             bytes: &bytes,
             calls: 0,
         },
-        ReaderLimits {
-            buffer_bytes: 32,
-            capture_bytes: 2,
-            recovery_bytes: None,
-        },
+        ReaderLimits::new()
+            .with_buffer_bytes(32)
+            .with_capture_bytes(2)
+            .with_recovery_bytes(None),
     )
     .unwrap();
     let Some(Event::Packet(p)) = r.next_packet(|_| 2).unwrap() else {
@@ -350,18 +346,10 @@ fn truncated_packet_after_recovery_reports_packet_offset() {
             r.next_packet(|_| 4).unwrap(),
             Some(Event::Packet(_))
         ));
-        assert_eq!(
-            r.next_packet(|_| 4).unwrap(),
-            Some(Event::Tail {
-                offset: 35,
-                bytes: cut as u64,
-                kind: TailKind::TruncatedPacket,
-                recovery: Some(Recovery {
-                    start_offset: 28,
-                    scanned_bytes: 7
-                }),
-            })
-        );
+        assert!(matches!(r.next_packet(|_| 4).unwrap(), Some(Event::Tail {
+            offset: 35, bytes, kind: TailKind::TruncatedPacket,
+            recovery: Some(Recovery { start_offset: 28, scanned_bytes: 7, .. }), ..
+        }) if bytes == cut as u64));
         assert_eq!(r.position(), 35 + cut as u64);
         assert!(r.next_packet(|_| 0).unwrap().is_none());
     }

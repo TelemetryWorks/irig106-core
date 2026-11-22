@@ -5,7 +5,8 @@ Slice 2 supplies primary-header/checksum/basic-length tests and shared `Rtc`.
 Slice 4 adds typed completion, optional recovery caps and terminal evidence,
 including checked offset-overflow unit coverage. See [slice 2](verification-s02.md),
 [slice 3](verification-s03.md) and [slice 4](verification-s04.md) clause evidence.
-Secondary/trailer and inspection requirements remain planned; allocation-failure
+Slice 5 adds secondary checksum/reserved evidence and trailer ranges; see
+[clause evidence](verification-s05.md). Inspection remains planned; allocation-failure
 handling is typed but no process-OOM test is claimed. No whole-recording or
 whole-standard conformance is asserted.
 

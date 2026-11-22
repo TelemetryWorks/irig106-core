@@ -1,5 +1,5 @@
 //! Slice4: L3-END-004/REC-003/ERR-004; seed framing oracle from §11.2.1.1.
-use irig106_core::{ErrorKind, Event, HeaderError, PacketReader, ReaderLimits, Recovery, TailKind};
+use irig106_core::{ErrorKind, Event, HeaderError, PacketReader, ReaderLimits, TailKind};
 use std::io::{self, Read};
 
 fn packet(flags: u8, data: &[u8]) -> Vec<u8> {
@@ -24,20 +24,16 @@ fn packet(flags: u8, data: &[u8]) -> Vec<u8> {
 fn reader(b: &[u8], limit: Option<u64>) -> PacketReader<&[u8]> {
     PacketReader::new(
         b,
-        ReaderLimits {
-            buffer_bytes: 3,
-            capture_bytes: 4,
-            recovery_bytes: limit,
-        },
+        ReaderLimits::new()
+            .with_buffer_bytes(3)
+            .with_capture_bytes(4)
+            .with_recovery_bytes(limit),
     )
     .unwrap()
 }
 
-fn recovered(start_offset: u64, scanned_bytes: u64) -> Option<Recovery> {
-    Some(Recovery {
-        start_offset,
-        scanned_bytes,
-    })
+fn recovered(start_offset: u64, scanned_bytes: u64) -> Option<(u64, u64)> {
+    Some((start_offset, scanned_bytes))
 }
 
 #[test]
@@ -85,18 +81,28 @@ fn every_established_packet_cut_remains_a_tail() {
                     r.next_packet(|_| 0).unwrap(),
                     Some(Event::Packet(_))
                 ));
+                let Some(Event::Tail {
+                    offset,
+                    bytes,
+                    kind,
+                    recovery,
+                    ..
+                }) = r.next_packet(|_| capture).unwrap()
+                else {
+                    panic!("tail")
+                };
                 assert_eq!(
-                    r.next_packet(|_| capture).unwrap(),
-                    Some(Event::Tail {
-                        offset: 28,
-                        bytes: cut as u64,
-                        kind: if cut < 24 {
+                    (offset, bytes, kind, recovery),
+                    (
+                        28,
+                        cut as u64,
+                        if cut < 24 {
                             TailKind::PartialHeader
                         } else {
                             TailKind::TruncatedPacket
                         },
-                        recovery: None,
-                    })
+                        None
+                    )
                 );
                 assert!(r.next_packet(|_| 0).unwrap().is_none());
             }
@@ -115,7 +121,10 @@ fn recovery_cap_is_inclusive_and_optional() {
     let mut r = reader(&b, Some(6));
     let e = r.next_packet(|_| 0).unwrap_err();
     assert!(matches!(e.reason, ErrorKind::RecoveryLimit { limit: 6 }));
-    assert_eq!(e.recovery, recovered(0, 6));
+    assert_eq!(
+        e.recovery.map(|r| (r.start_offset, r.scanned_bytes)),
+        recovered(0, 6)
+    );
     assert_eq!(e.position, 30); // 24-byte lookahead plus six allowed shifts.
     assert!(r.next_packet(|_| 0).unwrap().is_none());
     assert!(matches!(
@@ -144,18 +153,27 @@ fn recovery_budget_resets_per_incident_and_eof_keeps_evidence() {
     let junk = [0xFF; 27];
     let e = reader(&junk, None).next_packet(|_| 0).unwrap_err();
     assert!(matches!(e.reason, ErrorKind::NoCompletePacket { .. }));
-    assert_eq!(e.recovery, recovered(0, 3));
+    assert_eq!(
+        e.recovery.map(|r| (r.start_offset, r.scanned_bytes)),
+        recovered(0, 3)
+    );
     let b = [packet(0, &[1; 4]), junk.to_vec()].concat();
     let mut r = reader(&b, None);
     r.next_packet(|_| 0).unwrap();
+    let Some(Event::Tail {
+        offset,
+        bytes,
+        kind,
+        recovery,
+        ..
+    }) = r.next_packet(|_| 0).unwrap()
+    else {
+        panic!("tail")
+    };
+    assert_eq!((offset, bytes, kind), (28, 27, TailKind::Unsynchronized));
     assert_eq!(
-        r.next_packet(|_| 0).unwrap(),
-        Some(Event::Tail {
-            offset: 28,
-            bytes: 27,
-            kind: TailKind::Unsynchronized,
-            recovery: recovered(28, 3),
-        })
+        recovery.map(|r| (r.start_offset, r.scanned_bytes)),
+        recovered(28, 3)
     );
 }
 
@@ -172,7 +190,10 @@ fn structural_and_io_failures_keep_typed_causes_and_recovery() {
         e.reason,
         ErrorKind::Header(HeaderError::UnalignedPacket { length: 30 })
     ));
-    assert_eq!(e.recovery, recovered(28, 7));
+    assert_eq!(
+        e.recovery.map(|r| (r.start_offset, r.scanned_bytes)),
+        recovered(28, 7)
+    );
     assert!(
         std::error::Error::source(&e)
             .unwrap()
@@ -196,7 +217,10 @@ fn structural_and_io_failures_keep_typed_causes_and_recovery() {
     assert!(
         matches!(&e.reason, ErrorKind::Io(source) if source.kind() == io::ErrorKind::PermissionDenied)
     );
-    assert_eq!(e.recovery, recovered(28, 3));
+    assert_eq!(
+        e.recovery.map(|r| (r.start_offset, r.scanned_bytes)),
+        recovered(28, 3)
+    );
     assert_eq!(
         std::error::Error::source(&e)
             .unwrap()
@@ -216,39 +240,26 @@ fn claimed_truncated_body_is_not_rescanned_for_nested_sync() {
     let b = [good, tail].concat();
     let mut r = reader(&b, None);
     r.next_packet(|_| 0).unwrap();
-    assert_eq!(
+    assert!(matches!(
         r.next_packet(|_| 0).unwrap(),
         Some(Event::Tail {
             offset: 28,
             bytes: 52,
             kind: TailKind::TruncatedPacket,
             recovery: None,
+            ..
         })
-    );
+    ));
     assert!(r.next_packet(|_| 0).unwrap().is_none());
 }
 
 #[test]
 fn caller_limit_errors_are_typed_and_do_not_become_no_complete_packet() {
-    let e = PacketReader::new(
-        &[][..],
-        ReaderLimits {
-            buffer_bytes: 0,
-            ..ReaderLimits::default()
-        },
-    )
-    .unwrap_err();
+    let e = PacketReader::new(&[][..], ReaderLimits::new().with_buffer_bytes(0)).unwrap_err();
     assert!(matches!(e.reason, ErrorKind::InvalidBuffer));
     assert_eq!((e.position, e.recovery), (0, None));
     let b = [vec![0xFF; 7], packet(0, &[1; 4])].concat();
-    let mut r = PacketReader::new(
-        &b[..],
-        ReaderLimits {
-            capture_bytes: 3,
-            ..ReaderLimits::default()
-        },
-    )
-    .unwrap();
+    let mut r = PacketReader::new(&b[..], ReaderLimits::new().with_capture_bytes(3)).unwrap();
     let e = r.next_packet(|_| usize::MAX).unwrap_err(); // Clamp to DATA4 first.
     assert!(matches!(
         e.reason,
@@ -257,7 +268,10 @@ fn caller_limit_errors_are_typed_and_do_not_become_no_complete_packet() {
             limit: 3
         }
     ));
-    assert_eq!(e.recovery, recovered(0, 7));
+    assert_eq!(
+        e.recovery.map(|r| (r.start_offset, r.scanned_bytes)),
+        recovered(0, 7)
+    );
     assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
     assert!(r.next_packet(|_| 0).unwrap().is_none());
 }

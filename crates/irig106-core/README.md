@@ -10,7 +10,9 @@ finding and basic framing; payload meaning stays with TMATS, time and decode.
 Default recovery continues to EOF with bounded memory. The reader uses
 typed errors: NoCompletePacket for EOF before any complete frame, original
 I/O/structural causes and explicit optional caller caps (RecoveryLimit).
-Secondary/trailer integrity checks remain slice 5.
+Secondary checksum/reserved evidence and DATA/filler/checksum ranges are now
+exposed. Packet-data checksum contents remain NotChecked. Use ReaderLimits::new()
+or Default plus builder setters; evidence structs and Event::Tail are extensible.
 
 See the [repository requirements and plan](https://github.com/TelemetryWorks/irig106-core/blob/main/docs/requirements.md)
 and [proposed API](https://github.com/TelemetryWorks/irig106-core/blob/main/docs/api.md).

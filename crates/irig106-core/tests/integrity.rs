@@ -85,6 +85,13 @@ fn every_trailer_width_keeps_data_filler_checksum_disjoint() {
             );
             assert_eq!(p.body_prefix, [1, 2, 3, 4, 5]); // FF filler/checksum never DATA.
             assert_eq!(p.secondary_integrity.is_some(), secondary != 0);
+            let e = PacketReader::new(&b[..47], ReaderLimits::default())
+                .unwrap()
+                .next_packet(|_| 5)
+                .unwrap_err();
+            assert!(
+                matches!(e.reason, ErrorKind::NoCompletePacket {tail:Some(t)} if t.kind == irig106_core::TailKind::TruncatedPacket && t.bytes == 47)
+            );
         }
     }
 }
@@ -127,6 +134,15 @@ fn insufficient_trailer_space_stops_before_capture() {
 
 #[test]
 fn limit_builders_and_error_display_are_consumer_apis() {
+    let defaults = ReaderLimits::default();
+    assert_eq!(
+        (
+            defaults.buffer_bytes,
+            defaults.capture_bytes,
+            defaults.recovery_bytes
+        ),
+        (8192, 65536, None)
+    );
     let limits = ReaderLimits::new()
         .with_buffer_bytes(3)
         .with_capture_bytes(5)
@@ -196,4 +212,20 @@ fn limit_builders_and_error_display_are_consumer_apis() {
         e.to_string(),
         "packet reader at 0: no complete Chapter 10 packet found"
     );
+}
+
+#[test]
+fn range_arithmetic_handles_the_largest_aligned_length_without_packet_allocation() {
+    let mut b = frame(0, &[], 24); // Only a primary header is ever allocated.
+    b[4..8].copy_from_slice(&0xFFFF_FFFCu32.to_le_bytes());
+    b[8..12].copy_from_slice(&0xFFFF_FFE4u32.to_le_bytes());
+    let sum: u32 = b[..22]
+        .chunks_exact(2)
+        .map(|w| u16::from_le_bytes([w[0], w[1]]) as u32)
+        .sum();
+    b[22..24].copy_from_slice(&(sum as u16).to_le_bytes());
+    let ranges = PacketRanges::from_header(&Header::parse(&b).unwrap()).unwrap();
+    assert_eq!(ranges.data, 24..0xFFFF_FFFC);
+    assert_eq!(ranges.filler, 0xFFFF_FFFC..0xFFFF_FFFC);
+    assert_eq!(ranges.checksum, 0xFFFF_FFFC..0xFFFF_FFFC);
 }
