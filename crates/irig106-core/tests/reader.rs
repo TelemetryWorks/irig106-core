@@ -1,0 +1,356 @@
+//! Seed transport regressions; partial L3-IO-002/CAP-002/REC-003/END-004.
+//! Copied/adapted from time 5899806 (S16b / PR66); no complete-reader credit.
+use irig106_core::{Event, HeaderError, PacketReader, ReaderLimits, TailKind};
+use std::io::{self, Read};
+
+// 106-24R1 §11.2.1.1, 24-byte primary header, little-endian
+// word checksum over bytes 0..22. Bit 7, not bit 2, selects the secondary.
+fn packet(flags: u8, data: &[u8]) -> Vec<u8> {
+    let start = 24 + if flags & 0x80 != 0 { 12 } else { 0 };
+    let length = (start + data.len()).next_multiple_of(4);
+    let mut bytes = vec![0xAA; length];
+    bytes[..24].fill(0);
+    bytes[..2].copy_from_slice(&[0x25, 0xEB]);
+    bytes[4..8].copy_from_slice(&(length as u32).to_le_bytes());
+    bytes[8..12].copy_from_slice(&(data.len() as u32).to_le_bytes());
+    bytes[14] = flags;
+    bytes[15] = 9;
+    let sum = bytes[..22].chunks_exact(2).fold(0u16, |s, w| {
+        s.wrapping_add(u16::from_le_bytes([w[0], w[1]]))
+    });
+    bytes[22..24].copy_from_slice(&sum.to_le_bytes());
+    bytes[start..start + data.len()].copy_from_slice(data);
+    bytes
+}
+fn reader(bytes: &[u8]) -> PacketReader<&[u8]> {
+    PacketReader::new(
+        bytes,
+        ReaderLimits {
+            buffer_bytes: 32,
+            capture_bytes: 16,
+        },
+    )
+    .unwrap()
+}
+#[test]
+fn bounded_reader_crosses_small_buffers_without_exposing_filler() {
+    struct Chunked {
+        bytes: std::fs::File,
+        largest: usize,
+    }
+    impl Read for Chunked {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            self.largest = self.largest.max(out.len());
+            let n = out.len().min(3);
+            self.bytes.read(&mut out[..n])
+        }
+    }
+    let data = packet(0, &[1, 2, 3, 4, 5]).repeat(100);
+    let path = std::env::temp_dir().join(format!("irigcore-small-buffer-{}", std::process::id()));
+    std::fs::write(&path, data).unwrap();
+    let input = Chunked {
+        bytes: std::fs::File::open(&path).unwrap(),
+        largest: 0,
+    };
+    let mut r = PacketReader::new(
+        input,
+        ReaderLimits {
+            buffer_bytes: 32,
+            capture_bytes: 16,
+        },
+    )
+    .unwrap();
+    for i in 0..100 {
+        let Some(Event::Packet(p)) = r.next_packet(|_| 16).unwrap() else {
+            panic!("packet")
+        };
+        assert_eq!(p.offset, i * 32);
+        assert_eq!(p.body_prefix, [1, 2, 3, 4, 5]);
+        assert_eq!(p.header.data_length(), 5);
+        assert!(p.secondary.is_none());
+    }
+    assert!(r.next_packet(|_| 0).unwrap().is_none());
+    assert_eq!(r.position(), 3200);
+    assert!(r.into_inner().largest <= 32);
+    std::fs::remove_file(path).unwrap();
+}
+#[test]
+fn secondary_bit_and_capture_cap_are_explicit() {
+    for flags in [4, 0x80] {
+        let bytes = packet(flags, &[1, 2, 3]);
+        let mut r = reader(&bytes);
+        let Some(Event::Packet(p)) = r.next_packet(|_| 2).unwrap() else {
+            panic!("packet")
+        };
+        assert_eq!(p.secondary, (flags == 0x80).then_some([0xAA; 12]));
+        assert_eq!(p.body_prefix, [1, 2]);
+    }
+    let bytes = packet(0, &[0; 20]);
+    assert_eq!(
+        reader(&bytes).next_packet(|_| 17).unwrap_err().kind(),
+        io::ErrorKind::InvalidInput
+    );
+    assert!(
+        PacketReader::new(
+            &[][..],
+            ReaderLimits {
+                buffer_bytes: 0,
+                capture_bytes: 0
+            }
+        )
+        .is_err()
+    );
+}
+#[test]
+fn framing_recovery_and_final_tails_remain_distinct() {
+    let good = packet(0, &[1, 2, 3, 4]);
+    let mut bytes = vec![0xFF; 29];
+    bytes.extend_from_slice(&good);
+    bytes.extend_from_slice(&[0; 512]);
+    let mut r = reader(&bytes);
+    let Some(Event::Packet(p)) = r.next_packet(|_| 0).unwrap() else {
+        panic!("packet")
+    };
+    assert_eq!((p.offset, p.recovered_bytes), (29, 29));
+    assert!(matches!(
+        r.next_packet(|_| 0).unwrap(),
+        Some(Event::Tail {
+            kind: TailKind::Unsynchronized,
+            bytes: 512,
+            offset: 57
+        })
+    ));
+    assert!(r.next_packet(|_| 0).unwrap().is_none());
+    assert_eq!(
+        reader(&[0; 512]).next_packet(|_| 0).unwrap_err().kind(),
+        io::ErrorKind::InvalidData
+    );
+    for (cut, kind) in [
+        (13, TailKind::PartialHeader),
+        (26, TailKind::TruncatedPacket),
+    ] {
+        assert!(
+            matches!(reader(&good[..cut]).next_packet(|_| 4).unwrap(), Some(Event::Tail { kind: k, bytes: n, .. }) if k == kind && n == cut as u64)
+        );
+    }
+    for (flags, length) in [(0, 0u32), (0, 25), (0x80, 24)] {
+        let mut bad = good.clone();
+        bad[4..8].copy_from_slice(&length.to_le_bytes());
+        bad[14] = flags;
+        let sum = bad[..22].chunks_exact(2).fold(0u16, |s, w| {
+            s.wrapping_add(u16::from_le_bytes([w[0], w[1]]))
+        });
+        bad[22..24].copy_from_slice(&sum.to_le_bytes());
+        let mut r = reader(&bad);
+        assert_eq!(
+            r.next_packet(|_| 0).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(r.next_packet(|_| 0).unwrap().is_none());
+    }
+    // A valid primary checksum cannot excuse impossible Data Length.
+    let mut bad = good.clone();
+    bad[8] = 5;
+    let sum = 0xEB25u16 + 28 + 5 + 0x0900;
+    bad[22..24].copy_from_slice(&sum.to_le_bytes());
+    assert_eq!(
+        reader(&bad).next_packet(|_| 0).unwrap_err().kind(),
+        io::ErrorKind::InvalidData
+    );
+}
+// §11.2.1.1: checksum is mandatory even at the expected packet offset.
+// recovered_bytes is the finding evidence consumed by the joining loop.
+#[test]
+fn bad_checksum_at_expected_offset_resyncs_with_exact_finding_count() {
+    let good = packet(0, &[1; 4]);
+    let mut bad = packet(0, &[9; 4]);
+    bad[22] ^= 1; // Sync and all lengths remain valid; only checksum differs.
+    let next = packet(0, &[2; 4]);
+    let bytes = [good, bad.clone(), next].concat();
+    let mut r = reader(&bytes);
+    let Some(Event::Packet(first)) = r.next_packet(|_| 4).unwrap() else {
+        panic!("first packet")
+    };
+    assert_eq!((first.offset, first.recovered_bytes), (0, 0));
+    let Some(Event::Packet(recovered)) = r.next_packet(|_| 4).unwrap() else {
+        panic!("recovered packet")
+    };
+    assert_eq!((recovered.offset, recovered.recovered_bytes), (56, 28));
+    assert_eq!(recovered.body_prefix, [2; 4]);
+    assert!(r.next_packet(|_| 0).unwrap().is_none());
+    assert_eq!(
+        reader(&bad).next_packet(|_| 0).unwrap_err().kind(),
+        io::ErrorKind::InvalidData
+    );
+}
+// §11.2.1.1 Packet Length: isolate divisibility, with no Data Length violation.
+#[test]
+fn unaligned_length_alone_is_invalid_even_with_valid_checksum() {
+    let mut bytes = packet(0, &[]);
+    bytes[4..8].copy_from_slice(&26u32.to_le_bytes());
+    // 0xEB25 sync + 0x001A length + 0x0900 type = 0xF43F; Data Length=0.
+    bytes[22..24].copy_from_slice(&[0x3F, 0xF4]);
+    bytes.extend_from_slice(&[0xAA; 2]);
+    assert_eq!(
+        reader(&bytes).next_packet(|_| 0).unwrap_err().kind(),
+        io::ErrorKind::InvalidData
+    );
+}
+
+#[test]
+fn interrupted_reads_retry_but_real_errors_terminate() {
+    struct Flaky<'a> {
+        bytes: &'a [u8],
+        calls: usize,
+    }
+    impl Read for Flaky<'_> {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            self.calls += 1;
+            if matches!(self.calls, 1 | 3) {
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+            self.bytes.read(out)
+        }
+    }
+    let bytes = packet(0, &[7; 60]);
+    let mut r = PacketReader::new(
+        Flaky {
+            bytes: &bytes,
+            calls: 0,
+        },
+        ReaderLimits {
+            buffer_bytes: 32,
+            capture_bytes: 2,
+        },
+    )
+    .unwrap();
+    let Some(Event::Packet(p)) = r.next_packet(|_| 2).unwrap() else {
+        panic!("packet")
+    };
+    assert_eq!(p.body_prefix, [7, 7]);
+    assert_eq!(r.position(), 84);
+    assert!(r.into_inner().calls >= 5); // header read and drain both interrupted
+    struct Broken;
+    impl Read for Broken {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(io::ErrorKind::PermissionDenied.into())
+        }
+    }
+    let mut r = PacketReader::new(Broken, ReaderLimits::default()).unwrap();
+    assert_eq!(
+        r.next_packet(|_| 0).unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert!(r.next_packet(|_| 0).unwrap().is_none());
+}
+
+#[test]
+fn default_recovery_preserves_padding_larger_than_one_mib() {
+    let padding = 1024 * 1024 + 16;
+    let bytes = [packet(0, &[1; 4]), vec![0; padding]].concat();
+    let mut r = reader(&bytes);
+    assert!(matches!(
+        r.next_packet(|_| 0).unwrap(),
+        Some(Event::Packet(_))
+    ));
+    assert!(
+        matches!(r.next_packet(|_| 0).unwrap(), Some(Event::Tail { offset: 28, bytes, kind: TailKind::Unsynchronized }) if bytes == padding as u64)
+    );
+    assert!(r.next_packet(|_| 0).unwrap().is_none());
+}
+
+// Reviewer M22/M23: established input must not turn structural failure into
+// recovery, or erase the typed cause. §11.2.1.1 c: length is divisible by four.
+#[test]
+fn impossible_length_after_good_packet_stops_with_typed_cause() {
+    let good = packet(0, &[1; 4]);
+    let mut bad = packet(0, &[]);
+    bad[4..8].copy_from_slice(&30u32.to_le_bytes());
+    // EB25 + 001E + 0900 = F443; Data Length=0 isolates alignment.
+    bad[22..24].copy_from_slice(&[0x43, 0xF4]);
+    bad.extend_from_slice(&[0xAA; 6]);
+    let bytes = [good.clone(), bad, good].concat(); // Recoverable later header.
+    let mut r = reader(&bytes);
+    assert!(matches!(
+        r.next_packet(|_| 0).unwrap(),
+        Some(Event::Packet(_))
+    ));
+    let error = r.next_packet(|_| 0).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert_eq!(
+        error
+            .get_ref()
+            .and_then(|e| e.downcast_ref::<HeaderError>()),
+        Some(&HeaderError::UnalignedPacket { length: 30 })
+    );
+    assert_eq!(r.position(), 28 + 24); // No recovery past the rejected header.
+    assert!(r.next_packet(|_| 0).unwrap().is_none());
+    assert_eq!(r.position(), 52); // Buffered read-ahead is not consumed input.
+}
+
+// Reviewer M30: an actual read error during filler drain is not EOF.
+#[test]
+fn permission_denied_during_filler_skip_is_not_a_truncated_tail() {
+    struct HeaderThenDenied<'a> {
+        header: &'a [u8],
+        calls: usize,
+    }
+    impl Read for HeaderThenDenied<'_> {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            self.calls += 1;
+            if self.header.is_empty() {
+                Err(io::ErrorKind::PermissionDenied.into())
+            } else {
+                self.header.read(out)
+            }
+        }
+    }
+    let mut header = packet(0, &[]);
+    header[4..8].copy_from_slice(&28u32.to_le_bytes());
+    // EB25 + 001C + 0900 = F441; zero DATA means four filler bytes to skip.
+    header[22..24].copy_from_slice(&[0x41, 0xF4]);
+    let mut r = PacketReader::new(
+        HeaderThenDenied {
+            header: &header,
+            calls: 0,
+        },
+        ReaderLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        r.next_packet(|_| 0).unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert_eq!(r.position(), 24);
+    assert!(r.next_packet(|_| 0).unwrap().is_none());
+    assert_eq!(r.into_inner().calls, 2); // Header served, then filler read denied.
+}
+
+// Reviewer M07/M08: both secondary and body truncations use the recovered
+// packet offset, excluding bytes skipped before its checksum-qualified header.
+#[test]
+fn truncated_packet_after_recovery_reports_packet_offset() {
+    for (flags, cut) in [(0x80, 29), (0, 26)] {
+        let bytes = [
+            packet(0, &[1; 4]),
+            vec![0xFF; 7],
+            packet(flags, &[2; 4])[..cut].to_vec(),
+        ]
+        .concat();
+        let mut r = reader(&bytes);
+        assert!(matches!(
+            r.next_packet(|_| 4).unwrap(),
+            Some(Event::Packet(_))
+        ));
+        assert_eq!(
+            r.next_packet(|_| 4).unwrap(),
+            Some(Event::Tail {
+                offset: 35,
+                bytes: cut as u64,
+                kind: TailKind::TruncatedPacket,
+            })
+        );
+        assert_eq!(r.position(), 35 + cut as u64);
+        assert!(r.next_packet(|_| 0).unwrap().is_none());
+    }
+}
