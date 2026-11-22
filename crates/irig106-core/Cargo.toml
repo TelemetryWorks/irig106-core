@@ -1,0 +1,10 @@
+[package]
+name = "irig106-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Structural traversal and packet parsing for IRIG 106 Chapter 10 streams."
+readme = "README.md"
+publish = ["crates-io"]
