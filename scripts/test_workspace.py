@@ -1,4 +1,4 @@
-"""Slice 1 layout/packaging contract; no parser behavior is claimed."""
+"""Workspace, dependency and packaging contracts; parser behavior has Rust tests."""
 import hashlib
 import json
 from pathlib import Path
@@ -28,20 +28,21 @@ class WorkspaceContract(unittest.TestCase):
         self.assertEqual(package["targets"][0]["src_path"], str(CRATE / "src/lib.rs"))
         self.assertEqual(data["workspace_members"], data["workspace_default_members"])
 
-    def test_placeholder_and_metadata_are_preserved(self):
-        """Slice 1 moves the scaffold; it does not implement or release 0.1."""
+    def test_metadata_and_dependency_boundary(self):
+        """Preserve package metadata and use only the approved registry dependency."""
         package, = self.metadata()["packages"]
         self.assertEqual(package["name"], "irig106-core")
         self.assertEqual(package["version"], "0.0.1")
         self.assertEqual(package["edition"], "2024")
         self.assertEqual(package["rust_version"], "1.85")
         self.assertEqual(package["license"], "Apache-2.0")
-        self.assertEqual(package["dependencies"], [])
-        # SHA-256 of src/lib.rs at base 38ac070; works in shallow CI checkouts.
-        self.assertEqual(
-            hashlib.sha256((CRATE / "src/lib.rs").read_bytes()).hexdigest(),
-            "c04c976b49d9540ebad87db788a0887ce2806ffef3f1ea64736bb845e6c7568b",
-        )
+        dependency, = package["dependencies"]
+        self.assertEqual(dependency["name"], "irig106-types")
+        self.assertEqual(dependency["req"], "^0.1")
+        self.assertIsNone(dependency.get("path"))
+        self.assertTrue(dependency["source"].startswith("registry+"))
+        self.assertFalse(dependency["uses_default_features"])
+        self.assertEqual(dependency["features"], [])
 
     def test_package_includes_documentation_and_license(self):
         """A nested crate must ship its own README and unchanged license."""
