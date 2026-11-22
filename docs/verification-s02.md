@@ -33,7 +33,7 @@ they are not claims of fully conforming packets.
 | checksum_wraps_excludes_stored_word_and_covers_every_primary_word | L3-HDR-001 literal modulo sums, stored-word exclusion, every non-sync covered byte/checksum byte |
 | short_sync_and_checksum_failures_are_typed | L3-HDR-001 lengths0..23, reversed sync and exact stored/computed evidence |
 | all_flags_use_bit7_alone_for_secondary_presence | L3-HDR-001 and primary-presence clause L3-SEC-005; all256 flag values, no semantic dispatch |
-| checksum_qualified_lengths_isolate_minimum_alignment_and_data_bounds | L3-LEN-001 24/36 minimum, zero/alignment/data edges, u32 extremes; no offset arithmetic claim |
+| checksum_qualified_lengths_isolate_minimum_alignment_and_data_bounds | L3-LEN-001 24/36 minimum, upper length words, zero/alignment/data edges, u32 extremes; no offset arithmetic claim |
 | primary_parse_does_not_require_body_or_read_following_bytes | Primary-only/unaligned input and following bytes ignored; not stream/EOF verification |
 
 After implementation all six focused tests and three workspace/package checks
@@ -49,3 +49,7 @@ MSRV1.85, platform tests, rustdoc and archived-source packaging at the exact hea
 No streamed packet, recovery cap, secondary checksum, trailer validation, packet
 maximum/nonempty-DATA rule or full-edition conformance is claimed. Those remain
 outside this primitive. No throughput/RSS result, publication or release workflow.
+
+Final inspection added positive nonzero upper length-word assertions within the
+ordinary packet maximum. They pass the implementation; no failing-first claim
+for this added control.

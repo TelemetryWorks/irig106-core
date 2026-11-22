@@ -119,6 +119,10 @@ fn all_flags_use_bit7_alone_for_secondary_presence() {
 
 #[test]
 fn checksum_qualified_lengths_isolate_minimum_alignment_and_data_bounds() {
+    // Nonzero upper words within the ordinary 524288-byte maximum.
+    let wide = Header::parse(&packed(524_288, 65_537, 0)).unwrap();
+    assert_eq!(wide.packet_length(), 524_288);
+    assert_eq!(wide.data_length(), 65_537);
     for (flags, minimum) in [(0, 24), (0x80, 36)] {
         assert_eq!(
             Header::parse(&packed(minimum - 4, 0, flags)),
