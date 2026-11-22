@@ -3,7 +3,13 @@
 **Implemented in slice 2:** `Header::parse(&[u8])`, `primary_checksum(&[u8; 24])`,
 `HeaderError`, `PRIMARY_HEADER_LEN` and re-exported shared `Rtc`. `Header` stores
 immutable primary bytes and exposes accessors named below (`channel()`, etc.).
-**The following streaming APIs remain design only.** Behavior follows
+**Slice 3** also exports PacketReader, ReaderLimits, Packet, Event and TailKind.
+The sketch below remains the target contract: the staged reader currently uses
+`std::io::Result`, and ReaderLimits has only buffer_bytes/capture_bytes.
+Typed completion/errors, optional recovery caps and terminal scanned evidence
+are slice 4. Seed empty input returns None; a first truncated frame returns Tail.
+Neither proves valid input: callers must require a complete Packet event (as
+time-cli does) until slice 4 supplies NoCompletePacket. Behavior follows
 [requirements](requirements.md), not this sketch alone.
 
 ```text
