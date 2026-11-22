@@ -2,9 +2,10 @@
 
 Owner approved 2026-11-22; recovery correction from the coordinator is binding.
 Slice 2 supplies primary-header/checksum/basic-length tests and shared `Rtc`.
-L3-HDR-001 and L3-LEN-001 have partial primitive coverage; stream offset overflow,
-expected-offset recovery and packet completeness remain unverified. Slice 3 adds partial buffered transport/capture/recovery clause evidence;
-completion/cap refinements, secondary/trailer and inspection remain planned. See the
+L3-HDR-001 and L3-LEN-001 have partial primitive coverage; stream offset overflow
+and complete-input classification remain unverified. Slice 3 adds buffered
+transport/capture and expected-offset checksum-recovery evidence. Completion/cap
+refinements, secondary/trailer and inspection remain planned. See the
 [slice 2](verification-s02.md) and [slice 3](verification-s03.md) evidence;
 no whole-reader verification is claimed.
 
