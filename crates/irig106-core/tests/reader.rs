@@ -1,6 +1,6 @@
 //! Seed transport regressions; partial L3-IO-002/CAP-002/REC-003/END-004.
 //! Copied/adapted from time 5899806 (S16b / PR66); no complete-reader credit.
-use irig106_core::{Event, PacketReader, ReaderLimits, TailKind};
+use irig106_core::{Event, HeaderError, PacketReader, ReaderLimits, TailKind};
 use std::io::{self, Read};
 
 // 106-24R1 §11.2.1.1, 24-byte primary header, little-endian
@@ -257,4 +257,100 @@ fn default_recovery_preserves_padding_larger_than_one_mib() {
         matches!(r.next_packet(|_| 0).unwrap(), Some(Event::Tail { offset: 28, bytes, kind: TailKind::Unsynchronized }) if bytes == padding as u64)
     );
     assert!(r.next_packet(|_| 0).unwrap().is_none());
+}
+
+// Reviewer M22/M23: established input must not turn structural failure into
+// recovery, or erase the typed cause. §11.2.1.1 c: length is divisible by four.
+#[test]
+fn impossible_length_after_good_packet_stops_with_typed_cause() {
+    let good = packet(0, &[1; 4]);
+    let mut bad = packet(0, &[]);
+    bad[4..8].copy_from_slice(&30u32.to_le_bytes());
+    // EB25 + 001E + 0900 = F443; Data Length=0 isolates alignment.
+    bad[22..24].copy_from_slice(&[0x43, 0xF4]);
+    bad.extend_from_slice(&[0xAA; 6]);
+    let bytes = [good.clone(), bad, good].concat(); // Recoverable later header.
+    let mut r = reader(&bytes);
+    assert!(matches!(
+        r.next_packet(|_| 0).unwrap(),
+        Some(Event::Packet(_))
+    ));
+    let error = r.next_packet(|_| 0).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert_eq!(
+        error
+            .get_ref()
+            .and_then(|e| e.downcast_ref::<HeaderError>()),
+        Some(&HeaderError::UnalignedPacket { length: 30 })
+    );
+    assert_eq!(r.position(), 28 + 24); // No recovery past the rejected header.
+    assert!(r.next_packet(|_| 0).unwrap().is_none());
+    assert_eq!(r.position(), 52); // Buffered read-ahead is not consumed input.
+}
+
+// Reviewer M30: an actual read error during filler drain is not EOF.
+#[test]
+fn permission_denied_during_filler_skip_is_not_a_truncated_tail() {
+    struct HeaderThenDenied<'a> {
+        header: &'a [u8],
+        calls: usize,
+    }
+    impl Read for HeaderThenDenied<'_> {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            self.calls += 1;
+            if self.header.is_empty() {
+                Err(io::ErrorKind::PermissionDenied.into())
+            } else {
+                self.header.read(out)
+            }
+        }
+    }
+    let mut header = packet(0, &[]);
+    header[4..8].copy_from_slice(&28u32.to_le_bytes());
+    // EB25 + 001C + 0900 = F441; zero DATA means four filler bytes to skip.
+    header[22..24].copy_from_slice(&[0x41, 0xF4]);
+    let mut r = PacketReader::new(
+        HeaderThenDenied {
+            header: &header,
+            calls: 0,
+        },
+        ReaderLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        r.next_packet(|_| 0).unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert_eq!(r.position(), 24);
+    assert!(r.next_packet(|_| 0).unwrap().is_none());
+    assert_eq!(r.into_inner().calls, 2); // Header served, then filler read denied.
+}
+
+// Reviewer M07/M08: both secondary and body truncations use the recovered
+// packet offset, excluding bytes skipped before its checksum-qualified header.
+#[test]
+fn truncated_packet_after_recovery_reports_packet_offset() {
+    for (flags, cut) in [(0x80, 29), (0, 26)] {
+        let bytes = [
+            packet(0, &[1; 4]),
+            vec![0xFF; 7],
+            packet(flags, &[2; 4])[..cut].to_vec(),
+        ]
+        .concat();
+        let mut r = reader(&bytes);
+        assert!(matches!(
+            r.next_packet(|_| 4).unwrap(),
+            Some(Event::Packet(_))
+        ));
+        assert_eq!(
+            r.next_packet(|_| 4).unwrap(),
+            Some(Event::Tail {
+                offset: 35,
+                bytes: cut as u64,
+                kind: TailKind::TruncatedPacket,
+            })
+        );
+        assert_eq!(r.position(), 35 + cut as u64);
+        assert!(r.next_packet(|_| 0).unwrap().is_none());
+    }
 }
