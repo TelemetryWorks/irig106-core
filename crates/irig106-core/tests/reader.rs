@@ -196,3 +196,65 @@ fn unaligned_length_alone_is_invalid_even_with_valid_checksum() {
         io::ErrorKind::InvalidData
     );
 }
+
+#[test]
+fn interrupted_reads_retry_but_real_errors_terminate() {
+    struct Flaky<'a> {
+        bytes: &'a [u8],
+        calls: usize,
+    }
+    impl Read for Flaky<'_> {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            self.calls += 1;
+            if matches!(self.calls, 1 | 3) {
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+            self.bytes.read(out)
+        }
+    }
+    let bytes = packet(0, &[7; 60]);
+    let mut r = PacketReader::new(
+        Flaky {
+            bytes: &bytes,
+            calls: 0,
+        },
+        ReaderLimits {
+            buffer_bytes: 32,
+            capture_bytes: 2,
+        },
+    )
+    .unwrap();
+    let Some(Event::Packet(p)) = r.next_packet(|_| 2).unwrap() else {
+        panic!("packet")
+    };
+    assert_eq!(p.body_prefix, [7, 7]);
+    assert_eq!(r.position(), 84);
+    assert!(r.into_inner().calls >= 5); // header read and drain both interrupted
+    struct Broken;
+    impl Read for Broken {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(io::ErrorKind::PermissionDenied.into())
+        }
+    }
+    let mut r = PacketReader::new(Broken, ReaderLimits::default()).unwrap();
+    assert_eq!(
+        r.next_packet(|_| 0).unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert!(r.next_packet(|_| 0).unwrap().is_none());
+}
+
+#[test]
+fn default_recovery_preserves_padding_larger_than_one_mib() {
+    let padding = 1024 * 1024 + 16;
+    let bytes = [packet(0, &[1; 4]), vec![0; padding]].concat();
+    let mut r = reader(&bytes);
+    assert!(matches!(
+        r.next_packet(|_| 0).unwrap(),
+        Some(Event::Packet(_))
+    ));
+    assert!(
+        matches!(r.next_packet(|_| 0).unwrap(), Some(Event::Tail { offset: 28, bytes, kind: TailKind::Unsynchronized }) if bytes == padding as u64)
+    );
+    assert!(r.next_packet(|_| 0).unwrap().is_none());
+}
