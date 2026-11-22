@@ -1,12 +1,13 @@
 # irig106-core
 
 Chapter 10 packet finding and structural checking for the TelemetryWorks IRIG 106
-ecosystem. **Current code is still the 0.0.1 placeholder**, moved unchanged into
-`crates/irig106-core`; the approved 0.1 reader is not implemented yet.
+ecosystem. Unreleased development toward 0.1 currently provides a primary
+header/checksum parser under `crates/irig106-core`. The streaming reader is not
+implemented yet; the manifest remains 0.0.1 and no new version is published.
 
 The virtual workspace uses edition 2024, MSRV 1.85 and Apache-2.0. It currently
-has one library and no dependencies. Published `irig106-types` 0.1 is the only
-approved ecosystem dependency, to be introduced with the header API.
+has one library. Published `irig106-types` 0.1 (defaults disabled) is its sole
+dependency, supplying the shared `Rtc`; no payload interpretation is performed.
 
 - [Requirements and nine-slice plan](docs/requirements.md)
 - [Proposed API and boundary behavior](docs/api.md)

@@ -1,9 +1,11 @@
 # Core 0.1 requirements and delivery plan
 
 Owner approved 2026-11-22; recovery correction from the coordinator is binding.
-All reader requirements below are **planned, unverified**. Slice 1 supplies
-contracts and workspace checks only; arithmetic template tests give no packet
-coverage. Subsequent tests cite L3 IDs and independent oracle evidence.
+Slice 2 supplies primary-header/checksum/basic-length tests and shared `Rtc`.
+L3-HDR-001 and L3-LEN-001 have partial primitive coverage; stream offset overflow,
+expected-offset recovery and packet completeness remain unverified. Streaming,
+secondary/trailer and inspection requirements remain planned. See the
+[slice 2 evidence](verification-s02.md); no whole-reader verification is claimed.
 
 Sources: **S** = 106-24R1 Chapter 11 §§11.2.1.1–11.2.1.2, as recorded in
 [time's reviewed evidence](provenance.md); **O** = owner/coordinator policy
@@ -48,7 +50,7 @@ aggregate CLI requirement receives verification credit.
 
 ## L3: verification obligations
 
-Every row remains planned except the explicit slice 1 scaffold checks.
+Coverage is clause-scoped in the slice evidence; planned probes are not passes.
 
 | ID → L2 parent | Oracle and required probes |
 | --- | --- |
@@ -65,7 +67,7 @@ Every row remains planned except the explicit slice 1 scaffold checks.
 | L3-INV-006 → L2-INV-006 | Independent totals; interleaved types; row/channel cap edges and arithmetic overflow; no growing packet/diagnostic vectors. |
 | L3-SEQ-006 → L2-SEQ-006 | 255→0, duplicate, discontinuity, interleaved channels and multiple types on one channel. |
 | L3-PRES-006 → L2-PRES-006 | Setup/index/event observations; absent complete vs incomplete scan; no semantic validity claim. |
-| L3-PKG-007 → L2-PKG-007 | Slice 1: metadata, unchanged scaffold digest and package file checks; CI builds archived source. Future: public consumer tests/types integration. |
+| L3-PKG-007 → L2-PKG-007 | Metadata, registry-only dependency/default-feature boundary and package file checks; CI builds archived source. Header integration tests use the shared Rtc directly. |
 | L3-REL-007 → L2-REL-007 | Future: exact-head CI/review ledger and unsigned publishing-path dry run; release remains separately authorized. |
 
 ## Nine review slices
@@ -90,3 +92,8 @@ for all supported widths. SIMD, async, mmap, parallel scanning and throughput
 claims need separate measured justification. Time remains paused; on resume it
 adopts published core and removes its duplicate reader. Core does not depend on
 TMATS 0.1; its parallel work must not block structural traversal.
+
+Further conformance work observed during slice 2 standard inspection: packet
+maximums/nonempty DATA (§11.2.1 c/e), reserved channel use and per-channel version
+constancy are not checked by the primary primitive. Allocate explicit later
+validator requirements before claiming full 106-24R1 conformance.
