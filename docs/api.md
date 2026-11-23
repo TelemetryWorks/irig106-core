@@ -9,22 +9,26 @@ RecoveryLimit, invalid buffer/capture bounds, allocation and offset overflow.
 Errors retain consumed `position`, optional `recovery`, and their original source.
 `kind()`/`get_ref()` retain broad seed classifications and HeaderError downcasts.
 NoCompletePacket carries optional `Tail` metadata; Event::Tail adds recovery.
-ReaderLimits literals now need recovery_bytes (or `..Default::default()`).
+Slice 5 makes Error, Recovery, Tail, ReaderLimits, Packet, SecondaryIntegrity,
+and PacketRanges non-exhaustive; Event::Tail is a non-exhaustive variant.
+Construct limits with ReaderLimits::new()/Default and with_buffer_bytes,
+with_capture_bytes, with_recovery_bytes builders. Other evidence is read through
+fields or patterns containing `..`; consumers cannot construct struct literals.
+ErrorKind and Error now format human-readable messages through Display.
 All errors/tails terminate iteration; repeated calls yield None. This is framing
 completion, not full packet/recording conformance. Behavior follows
 [requirements](requirements.md).
 
 ```text
-ReaderLimits {
-    buffer_bytes: usize,           // default 8192; nonzero
-    capture_bytes: usize,          // default 65536
-    recovery_bytes: Option<u64>,   // default None, NOT a fatal 1 MiB cap
-}
+ReaderLimits::new()               // defaults 8192 buffer / 65536 capture / None recovery
+    .with_buffer_bytes(8192)
+    .with_capture_bytes(65536)
+    .with_recovery_bytes(None)     // never a default fatal cap
 PacketReader<R: std::io::Read>::new(input, limits) -> Result<Self, Error>
 PacketReader::next_packet(capture: impl FnOnce(&Header) -> usize)
     -> Result<Option<Event>, Error>
 Event::Packet(Packet)
-Event::Tail { offset, bytes, kind, recovery }
+Event::Tail { offset, bytes, kind, recovery, .. } // pattern, not construction
 ```
 
 The synchronous std-first adapter sits above pure header/checksum functions.
@@ -38,7 +42,8 @@ Bit 7 selects twelve secondary bytes; bits 3–2 remain raw format evidence. No
 recording edition is inferred. Routing codes unknown to core remain observable. `Header::parse` validates only
 sync, checksum, minimum/aligned Packet Length and DATA containment. It accepts
 a primary-only slice even when secondary/body bytes are declared. It does not
-check trailer space, packet maximums, the nonempty-DATA rule or recording-wide
+check trailer space itself: PacketRanges::from_header and PacketReader do so
+before capture. It does not check packet maximums, nonempty DATA or recording-wide
 channel/version constraints; success is basic framing evidence, not conformance.
 
 `Packet` owns offset, header, raw secondary bytes, bounded `body_prefix` (DATA
@@ -88,16 +93,24 @@ not become fatal input merely because the content cannot be interpreted.
 
 ## Integrity and downstream ownership
 
-Primary checksum is mandatory. Secondary evidence keeps stored checksum, byte
+Primary checksum is mandatory. Packet.secondary_integrity keeps stored checksum, byte
 sum and alternative word sum over the ten non-checksum bytes (time RDG-008).
 The selected reading is byte sum; preserve the interpretation's suspect status
 and word-only matches. Reserved fields are separate evidence. A bad secondary
 checksum does not invalidate primary RTC or erase a structurally complete packet.
-Time consumers determine which time answers remain usable.
+SecondaryIntegrity::inspect accepts exactly twelve bytes; the reader rejects
+truncated secondary headers before inspection. It reports reserved bytes 8–9,
+not format-dependent bits inside the time value. Time consumers determine which
+time answers remain usable; RDG-008's interpretation status is unchanged.
 
 Trailer widths/ranges are checked, but packet-data checksum contents are
 `NotChecked` in 0.1 (or absent when flags select no checksum), never `Valid`.
-No payload meaning, secondary time conversion, calendar policy or TF codes move.
+Packet.ranges exposes packet-relative u32 ranges for DATA, filler and checksum.
+Widths from flag bits1–0 are 0/1/2/4; overlaps/insufficient space are fatal typed
+HeaderError before capture. Variable filler is allowed to preserve per-channel
+packet size (§11.2.1.4); filler byte values are not checked. Checksum contents are
+DataChecksumState::Absent or NotChecked, never Valid. No payload meaning,
+secondary time conversion, calendar policy or TF codes move.
 
 The optional inspection accumulator has explicit channel/row caps and checked
 counts, emits sequence/presence observations and retains no packet history.

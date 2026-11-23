@@ -31,7 +31,7 @@ impl Header {
     ///
     /// Checks sync, then primary checksum, then minimum/alignment/DATA bounds.
     /// No allocation or body access occurs. In particular, header success does
-    /// not establish stream input; EOF/completion is the future reader's job.
+    /// not establish stream input; EOF/completion is the reader's job.
     /// Trailer checksum space and other conformance rules are not checked here.
     /// **Traces:** L3-HDR-001 ← L2-HDR-001; L3-LEN-001 ← L2-LEN-001.
     pub fn parse(input: &[u8]) -> Result<Self, HeaderError> {
@@ -142,11 +142,11 @@ pub enum HeaderError {
         /// Sum of the eleven preceding words.
         computed: u16,
     },
-    /// Packet Length cannot contain its declared headers.
+    /// Packet Length cannot contain its required headers/trailer.
     PacketTooShort {
         /// Declared Packet Length.
         length: u32,
-        /// Required primary/secondary size.
+        /// Required structural minimum size.
         minimum: u32,
     },
     /// Packet Length is not divisible by four.
@@ -158,7 +158,7 @@ pub enum HeaderError {
     DataTooLong {
         /// Declared Data Length.
         length: u32,
-        /// Space remaining after primary/secondary headers, before trailer checks.
+        /// Available DATA space (trailer checks may subtract checksum bytes).
         available: u32,
     },
 }
@@ -173,7 +173,7 @@ impl fmt::Display for HeaderError {
                 "primary checksum {stored:#06X}, expected {computed:#06X}"
             ),
             Self::PacketTooShort { length, minimum } => {
-                write!(f, "packet length {length} is below header size {minimum}")
+                write!(f, "packet length {length} is below required size {minimum}")
             }
             Self::UnalignedPacket { length } => {
                 write!(f, "packet length {length} is not divisible by four")

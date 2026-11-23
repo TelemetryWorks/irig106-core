@@ -3,7 +3,12 @@ use crate::{HeaderError, TailKind};
 use std::{collections::TryReserveError, error::Error as StdError, fmt, io};
 
 /// One recovery incident; the 24-byte validation window is not charged.
+/// ```compile_fail,E0639
+/// use irig106_core::Recovery;
+/// fn rebuild(value: Recovery) { let _ = Recovery { ..value }; }
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Recovery {
     /// Expected packet offset where sync/checksum search began.
     pub start_offset: u64,
@@ -12,7 +17,12 @@ pub struct Recovery {
 }
 
 /// Terminal bytes preserved when EOF occurs before any complete packet.
+/// ```compile_fail,E0639
+/// use irig106_core::Tail;
+/// fn rebuild(value: Tail) { let _ = Tail { ..value }; }
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Tail {
     /// Partial header/packet or unsynchronized region start.
     pub offset: u64,
@@ -62,7 +72,12 @@ impl From<io::Error> for ErrorKind {
 }
 
 /// Terminal reader failure with exact consumed position and recovery context.
+/// ```compile_fail,E0639
+/// use irig106_core::Error;
+/// fn rebuild(value: Error) { let _ = Error { ..value }; }
+/// ```
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct Error {
     /// Typed cause; no error-message matching is required.
     pub reason: ErrorKind,
@@ -95,11 +110,31 @@ impl Error {
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "packet reader at {}: {:?}", self.position, self.reason)
+        write!(f, "packet reader at {}: {}", self.position, self.reason)
     }
 }
 impl StdError for Error {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         self.get_ref().map(|error| error as _)
+    }
+}
+
+impl fmt::Display for ErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "input read failed: {error}"),
+            Self::Header(error) => write!(f, "invalid packet framing: {error}"),
+            Self::NoCompletePacket { .. } => f.write_str("no complete Chapter 10 packet found"),
+            Self::RecoveryLimit { limit } => {
+                write!(f, "recovery search exhausted caller limit of {limit} bytes")
+            }
+            Self::InvalidBuffer => f.write_str("reader buffer must contain at least one byte"),
+            Self::CaptureLimit { requested, limit } => write!(
+                f,
+                "requested DATA prefix {requested} bytes exceeds capture limit {limit} bytes"
+            ),
+            Self::Allocation(error) => write!(f, "could not allocate DATA prefix: {error}"),
+            Self::OffsetOverflow => f.write_str("input byte offset exceeds u64 range"),
+        }
     }
 }

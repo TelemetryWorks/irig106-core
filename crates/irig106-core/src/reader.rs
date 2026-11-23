@@ -1,10 +1,17 @@
 //! Promoted time S16b transport; partial L3-IO-002/CAP-002/REC-003/END-004.
 //! No payload meaning; completion and recovery evidence are structure only.
-use crate::{Error, ErrorKind, Header, HeaderError, Recovery, Tail};
+use crate::{
+    Error, ErrorKind, Header, HeaderError, PacketRanges, Recovery, SecondaryIntegrity, Tail,
+};
 use std::io::{self, BufRead, BufReader, Read};
 
 /// Caller-owned transport bounds; no allocation follows Packet Length.
+/// ```compile_fail,E0639
+/// use irig106_core::ReaderLimits;
+/// fn rebuild(value: ReaderLimits) { let _ = ReaderLimits { ..value }; }
+/// ```
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct ReaderLimits {
     /// Fixed buffered-input capacity; must be nonzero.
     pub buffer_bytes: usize,
@@ -13,19 +20,48 @@ pub struct ReaderLimits {
     /// Optional per-incident candidate-displacement cap; None searches to EOF.
     pub recovery_bytes: Option<u64>,
 }
-impl Default for ReaderLimits {
-    fn default() -> Self {
+impl ReaderLimits {
+    /// Default limits: 8192 buffered bytes, 65536 capture bytes, uncapped recovery.
+    pub const fn new() -> Self {
         Self {
             buffer_bytes: 8192,
             capture_bytes: 65536,
             recovery_bytes: None,
         }
     }
+    /// Set input-buffer capacity; zero is rejected by PacketReader::new.
+    #[must_use]
+    pub const fn with_buffer_bytes(mut self, bytes: usize) -> Self {
+        self.buffer_bytes = bytes;
+        self
+    }
+    /// Set the maximum retained DATA prefix.
+    #[must_use]
+    pub const fn with_capture_bytes(mut self, bytes: usize) -> Self {
+        self.capture_bytes = bytes;
+        self
+    }
+    /// Set or remove the per-incident search cap; None continues to EOF.
+    #[must_use]
+    pub const fn with_recovery_bytes(mut self, bytes: Option<u64>) -> Self {
+        self.recovery_bytes = bytes;
+        self
+    }
+}
+impl Default for ReaderLimits {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 /// Captured prefix of DATA ONLY. Compare its length to `header.data_length()`
 /// before passing it to any decoder requiring a complete body. Filler/checksum
 /// bytes are drained, never exposed as data. Secondary bytes remain raw.
+/// ```compile_fail,E0639
+/// use irig106_core::Packet;
+/// fn rebuild(value: Packet) { let _ = Packet { ..value }; }
+/// ```
 #[derive(Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Packet {
     /// Packet start offset in the input stream.
     pub offset: u64,
@@ -33,6 +69,10 @@ pub struct Packet {
     pub header: Header,
     /// Uninterpreted secondary header, if bit 7 is set.
     pub secondary: Option<[u8; 12]>,
+    /// Raw secondary integrity evidence; mismatch does not discard this packet.
+    pub secondary_integrity: Option<SecondaryIntegrity>,
+    /// Checked relative DATA/filler/checksum ranges and checksum status.
+    pub ranges: PacketRanges,
     /// Caller-selected DATA prefix; not necessarily the complete DATA.
     pub body_prefix: Vec<u8>,
     /// Rejected byte positions skipped before this packet.
@@ -55,6 +95,13 @@ pub enum Event {
     /// A completely consumed frame, with optional bounded DATA capture.
     Packet(Packet),
     /// Terminal bytes that did not produce a complete frame.
+    /// ```compile_fail,E0638
+    /// use irig106_core::Event;
+    /// fn closed(event: Event) {
+    ///     if let Event::Tail { offset: _, bytes: _, kind: _, recovery: _ } = event {}
+    /// }
+    /// ```
+    #[non_exhaustive]
     Tail {
         /// Start of the tail.
         offset: u64,
@@ -228,6 +275,7 @@ impl<R: Read> PacketReader<R> {
             }
         };
         let offset = self.position - 24;
+        let ranges = PacketRanges::from_header(&header).map_err(ErrorKind::Header)?;
         let wanted = capture(&header).min(header.data_length() as usize);
         if wanted > self.limits.capture_bytes {
             return Err(ErrorKind::CaptureLimit {
@@ -259,7 +307,9 @@ impl<R: Read> PacketReader<R> {
         Ok(Some(Event::Packet(Packet {
             offset,
             header,
+            secondary_integrity: secondary.as_ref().map(SecondaryIntegrity::inspect),
             secondary,
+            ranges,
             body_prefix,
             recovered_bytes: offset - start,
         })))
