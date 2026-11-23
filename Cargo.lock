@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "irig106-core"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "irig106-types",
 ]
