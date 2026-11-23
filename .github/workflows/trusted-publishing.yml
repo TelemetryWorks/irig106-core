@@ -1,0 +1,311 @@
+name: Trusted publishing
+
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - 'scripts/release/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**'
+      - 'scripts/**'
+      - 'README.md'
+      - 'CHANGELOG.md'
+      - 'docs/RELEASING.md'
+      - 'docs/releases/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trusted-publishing-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: 2
+  PYTHONDONTWRITEBYTECODE: '1'
+  RELEASE_RUST_VERSION: '1.100.0'
+
+jobs:
+  gate:
+    name: Release gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read # Check the intended CI workflow for the exact tagged commit.
+    outputs:
+      version: ${{ steps.gate.outputs.version }}
+      publish: ${{ steps.gate.outputs.publish }}
+      crates: ${{ steps.gate.outputs.crates }}
+      commit: ${{ steps.gate.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Evaluate release requirements
+        id: gate
+        run: python3 scripts/release/pipeline.py gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  build:
+    name: Build
+    needs: gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    outputs:
+      rust-version: ${{ steps.rust.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install exact Rust toolchains
+        id: rust
+        run: |
+          rustup toolchain install "$RELEASE_RUST_VERSION" --profile minimal --component clippy,rustfmt
+          rustup toolchain install 1.85.0 --profile minimal
+          actual=$(rustc +"$RELEASE_RUST_VERSION" --version | cut -d ' ' -f 2)
+          test "$actual" = "$RELEASE_RUST_VERSION"
+          echo "version=$actual" >> "$GITHUB_OUTPUT"
+      - name: Release control tests
+        run: python3 -m unittest discover -s scripts/release -p 'test_*.py' -v
+      - name: Core qualification (also runs on PR dry runs)
+        run: |
+          cargo +"$RELEASE_RUST_VERSION" test --workspace --locked
+          cargo +1.85.0 check --workspace --locked
+          cargo +"$RELEASE_RUST_VERSION" clippy --workspace --locked --all-targets -- -D warnings
+          cargo +"$RELEASE_RUST_VERSION" fmt --all -- --check
+          RUSTDOCFLAGS='-D warnings' cargo +"$RELEASE_RUST_VERSION" doc --workspace --locked --no-deps
+          python3 scripts/test_workspace.py
+          python3 scripts/test_rss_probe.py
+          cargo +"$RELEASE_RUST_VERSION" build -p irig106-core --example inspect --locked
+          python3 scripts/test_inspect_example.py target/debug/examples/inspect
+          df -h .
+          cargo +"$RELEASE_RUST_VERSION" build -p irig106-core --example rss_probe --release --locked
+          python3 scripts/check_rss.py target/release/examples/rss_probe
+      - name: Package and verify packaged source
+        run: |
+          cargo +"$RELEASE_RUST_VERSION" package -p irig106-core --locked --list
+          cargo +"$RELEASE_RUST_VERSION" package -p irig106-core --locked
+      - name: Audit packaged dependency policy before approval
+        uses: EmbarkStudios/cargo-deny-action@70f81531115945ba6eb6b941ec9d39d063438eb9 # v2.1.2
+        with:
+          arguments: --locked --all-features
+      - name: Install pinned CycloneDX generator
+        run: cargo +"$RELEASE_RUST_VERSION" install cargo-cyclonedx --version 0.5.9 --locked
+      - name: Assemble frozen release payload
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          cargo +"$RELEASE_RUST_VERSION" cyclonedx --manifest-path "target/package/irig106-core-$VERSION/Cargo.toml" --all-features --target all --format json --spec-version 1.5
+          mkdir "$RUNNER_TEMP/release-artifacts"
+          cp "target/package/irig106-core-$VERSION.crate" "$RUNNER_TEMP/release-artifacts/"
+          cp "target/package/irig106-core-$VERSION/irig106-core.cdx.json" "$RUNNER_TEMP/release-artifacts/sbom.cdx.json"
+          cd "$RUNNER_TEMP/release-artifacts"
+          sha256sum "irig106-core-$VERSION.crate" sbom.cdx.json > SHA256SUMS
+      - name: Audit artifact checksums
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: python3 scripts/release/pipeline.py validate --directory "$RUNNER_TEMP/release-artifacts" --version "$VERSION"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-${{ needs.gate.outputs.version }}
+          path: |
+            ${{ runner.temp }}/release-artifacts/irig106-core-${{ needs.gate.outputs.version }}.crate
+            ${{ runner.temp }}/release-artifacts/sbom.cdx.json
+            ${{ runner.temp }}/release-artifacts/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 90
+
+  publish-path-check:
+    name: Publish path (dry run)
+    needs: [gate, build]
+    if: needs.gate.outputs.publish != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-${{ needs.gate.outputs.version }}
+          path: ${{ runner.temp }}/release-artifacts
+      - name: Reproduce the candidate without compiling or authenticating
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+          RUST_VERSION: ${{ needs.build.outputs.rust-version }}
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          python3 scripts/release/pipeline.py repackage --directory "$RUNNER_TEMP/release-artifacts" --version "$VERSION" --rust-version "$RUST_VERSION"
+      - name: Known-good registry byte comparison (published 0.0.1 placeholder)
+        run: python3 scripts/release/pipeline.py known-good
+
+  attest:
+    name: Checksums and attestations
+    needs: [gate, build]
+    if: needs.gate.outputs.publish == 'true' && github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write # Sign the frozen build output using GitHub OIDC.
+      attestations: write # Store provenance for both the crate and SBOM.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-${{ needs.gate.outputs.version }}
+          path: ${{ runner.temp }}/release-artifacts
+      - name: Validate source identity before signing
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.gate.outputs.commit }}
+        run: python3 scripts/release/pipeline.py identity --version "$VERSION"
+      - name: Validate checksums before signing
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: python3 scripts/release/pipeline.py validate --directory "$RUNNER_TEMP/release-artifacts" --version "$VERSION"
+      - name: Sign the crate and SBOM file
+        id: provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            ${{ runner.temp }}/release-artifacts/*.crate
+            ${{ runner.temp }}/release-artifacts/sbom.cdx.json
+      - name: Freeze provenance sidecar
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+          BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+        run: |
+          mkdir "$RUNNER_TEMP/release-attestations"
+          python3 - <<'PYBUNDLE'
+          import json
+          import os
+          from pathlib import Path
+          bundle = json.loads(Path(os.environ['BUNDLE']).read_text())
+          target = Path(os.environ['RUNNER_TEMP']) / 'release-attestations' / f"irig106-core-{os.environ['VERSION']}.crates.intoto.jsonl"
+          target.write_text(json.dumps(bundle, separators=(',', ':')) + '\n')
+          PYBUNDLE
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-${{ needs.gate.outputs.version }}-attestations
+          path: ${{ runner.temp }}/release-attestations/irig106-core-${{ needs.gate.outputs.version }}.crates.intoto.jsonl
+          if-no-files-found: error
+          retention-days: 90
+
+  publish:
+    name: Publish to crates.io
+    needs: [gate, build, attest]
+    if: needs.gate.outputs.publish == 'true' && github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write # Exchange a fresh short-lived crates.io token for this wave.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-${{ needs.gate.outputs.version }}{,-attestations}
+          merge-multiple: true
+          path: ${{ runner.temp }}/release-artifacts
+      - name: Verify provenance, repackage without compiling, compare existing versions
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_COMMIT: ${{ needs.gate.outputs.commit }}
+          VERSION: ${{ needs.gate.outputs.version }}
+          RUST_VERSION: ${{ needs.build.outputs.rust-version }}
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          python3 scripts/release/pipeline.py prepare --directory "$RUNNER_TEMP/release-artifacts" --version "$VERSION" --rust-version "$RUST_VERSION"
+      - name: Fresh OIDC credential for the single-crate publish wave
+        if: steps.prepare.outputs.upload == 'true'
+        id: auth
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+      - name: Publish without compiling
+        if: steps.prepare.outputs.upload == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          RUST_VERSION: ${{ needs.build.outputs.rust-version }}
+        run: cargo +"$RUST_VERSION" publish --manifest-path crates/irig106-core/Cargo.toml --locked --no-verify --registry crates-io
+      - name: Compare served bytes and registry checksum (new or existing version)
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: python3 scripts/release/pipeline.py registry --directory "$RUNNER_TEMP/release-artifacts" --version "$VERSION"
+
+  github-release:
+    name: GitHub release
+    needs: [gate, publish]
+    if: needs.gate.outputs.publish == 'true' && github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write # Retain frozen release assets; never replace existing bytes.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-${{ needs.gate.outputs.version }}{,-attestations}
+          merge-multiple: true
+          path: ${{ runner.temp }}/release-artifacts
+      - name: Verify provenance and retain immutable evidence with committed notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_COMMIT: ${{ needs.gate.outputs.commit }}
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: python3 scripts/release/pipeline.py github-release --directory "$RUNNER_TEMP/release-artifacts" --version "$VERSION"
+
+  verify:
+    name: Verify publication
+    needs: [gate, github-release]
+    if: needs.gate.outputs.publish == 'true' && github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-${{ needs.gate.outputs.version }}{,-attestations}
+          merge-multiple: true
+          path: ${{ runner.temp }}/release-artifacts
+      - name: Verify attached files, registry identity, attestations and docs.rs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_COMMIT: ${{ needs.gate.outputs.commit }}
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          gh release download "v$VERSION" --repo TelemetryWorks/irig106-core --dir "$RUNNER_TEMP/published-artifacts"
+          for file in "irig106-core-$VERSION.crate" sbom.cdx.json SHA256SUMS "irig106-core-$VERSION.crates.intoto.jsonl"; do
+            cmp "$RUNNER_TEMP/release-artifacts/$file" "$RUNNER_TEMP/published-artifacts/$file"
+          done
+          python3 scripts/release/pipeline.py verify --directory "$RUNNER_TEMP/published-artifacts" --version "$VERSION"

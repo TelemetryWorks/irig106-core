@@ -14,6 +14,9 @@ evidence, exact package inventory and archive verification
 handling is typed but no process-OOM test is claimed. No whole-recording or
 whole-standard conformance is asserted.
 
+Slice 9 supplies the base release pipeline and unsigned Publish path dry run
+([evidence](verification-s09.md)); this is adoption preparation, not publication.
+
 Sources: **S** = 106-24R1 Chapter 11 §§11.2.1.1–11.2.1.2, as recorded in
 [time's reviewed evidence](provenance.md); **O** = owner/coordinator policy
 2026-11-22; **T** = time L2/L3-CLI-104 and CLI-107 clause evidence, not wholesale
@@ -75,7 +78,7 @@ Coverage is clause-scoped in the slice evidence; planned probes are not passes.
 | L3-SEQ-006 → L2-SEQ-006 | 255→0, duplicate, discontinuity, interleaved channels and multiple types on one channel. |
 | L3-PRES-006 → L2-PRES-006 | Setup/index/event observations; absent complete vs incomplete scan; no semantic validity claim. |
 | L3-PKG-007 → L2-PKG-007 | Metadata, registry-only dependency/default-feature boundary and package file checks; CI builds archived source. Header integration tests use the shared Rtc directly. |
-| L3-REL-007 → L2-REL-007 | Exact-head CI/review ledgers; unsigned publishing-path dry run remains planned for slice 9. Release remains separately authorized. |
+| L3-REL-007 → L2-REL-007 | Exact-head CI/review ledgers and unsigned publishing-path dry run in slice 9. Cryptographic/registry mutation paths have mocked controls; real release remains separately authorized. |
 
 ## Nine review slices
 
