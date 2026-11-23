@@ -185,22 +185,11 @@ impl<R: Read> PacketReader<R> {
         }
         Ok(total)
     }
-    fn drain(&mut self, mut n: u64) -> Result<bool, ErrorKind> {
-        while n > 0 {
-            let available = match self.input.fill_buf() {
-                Ok(b) => b.len(),
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e.into()),
-            };
-            if available == 0 {
-                return Ok(false);
-            }
-            let take = available.min(n.try_into().unwrap_or(usize::MAX));
-            self.input.consume(take);
-            self.advance(take)?;
-            n -= take as u64;
-        }
-        Ok(true)
+    fn drain(&mut self, n: u64) -> Result<bool, ErrorKind> {
+        let mut packet_sized = vec![0; n as usize];
+        let consumed = self.read_counted(&mut packet_sized)?;
+        std::hint::black_box(&packet_sized);
+        Ok(consumed == packet_sized.len())
     }
     fn tail(&mut self, offset: u64, kind: TailKind) -> Result<Option<Event>, ErrorKind> {
         self.done = true;
