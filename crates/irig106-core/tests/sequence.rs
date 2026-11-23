@@ -98,6 +98,57 @@ fn one_byte_recovery_is_sticky_and_does_not_reset_sequence() {
 }
 
 #[test]
+fn successor_after_four_kib_recovery_is_not_contiguous() {
+    let b = [frame(1, 9, 8), vec![0xFF; 4096], frame(1, 9, 9)].concat();
+    let mut r = PacketReader::new(&b[..], ReaderLimits::new()).unwrap();
+    let mut a = Inspection::new(InspectionLimits::new(1, 1));
+    a.observe(&r.next_packet(|_| 0).unwrap().unwrap()).unwrap();
+    let s = a
+        .observe_with_sequence(&r.next_packet(|_| 0).unwrap().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (s.previous, s.expected(), s.observed, s.recovered_bytes),
+        (Some(8), Some(9), 9, 4096)
+    );
+    assert_ne!(s.kind(), SequenceKind::Contiguous);
+}
+
+#[test]
+fn recovery_attached_to_other_channel_prevents_contiguous() {
+    let b = [
+        frame(1, 9, 5),
+        vec![0xFF; 4096],
+        frame(2, 9, 60),
+        frame(1, 9, 6),
+    ]
+    .concat();
+    let mut r = PacketReader::new(&b[..], ReaderLimits::new()).unwrap();
+    let mut a = Inspection::new(InspectionLimits::new(2, 2));
+    a.observe(&r.next_packet(|_| 0).unwrap().unwrap()).unwrap();
+    let other = a
+        .observe_with_sequence(&r.next_packet(|_| 0).unwrap().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!((other.channel, other.recovered_bytes), (2, 4096));
+    let s = a
+        .observe_with_sequence(&r.next_packet(|_| 0).unwrap().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            s.channel,
+            s.previous,
+            s.expected(),
+            s.observed,
+            s.recovered_bytes
+        ),
+        (1, Some(5), Some(6), 6, 0)
+    );
+    assert_ne!(s.kind(), SequenceKind::Contiguous);
+}
+
+#[test]
 fn tail_and_rejected_packet_return_no_sequence_observation() {
     let b = [frame(1, 9, 70), vec![0x25]].concat();
     let mut r = PacketReader::new(&b[..], ReaderLimits::new()).unwrap();
