@@ -143,6 +143,9 @@ made fallible for std BTree storage; entry budgets are not process-RSS claims.
 PresenceFacts uses Present/Absent/Unknown. Setup is channel0/type01; index and
 events are raw types03/02. Matching headers do not validate payload contents or
 imply enabled features. Unseen records become Absent only after a complete,
-unfiltered scan; otherwise Unknown. Previously observed Present facts survive
-incomplete scans. The caller must mark read errors or omitted input explicitly.
+unfiltered scan with no recovered bytes; otherwise Unknown. Recovery is sticky:
+any accepted packet with recovered_bytes > 0 prevents absence claims even after
+later unrecovered packets and clean EOF (ScanStatus may still be Complete).
+Previously observed Present facts survive incomplete or recovered scans. The
+caller must mark read errors or omitted input explicitly.
 Sequence continuity and user-facing reports remain later work.

@@ -14,8 +14,8 @@ evidence, not process RSS. No packet payloads or diagnostics are retained.
 
 Presence is accepted header routing, not content validity or enabled features:
 setup channel0/type01, index03, events02. Absent requires caller-declared clean
-EOF after at least one packet and no failure; tails, errors and early stops leave
-unseen records Unknown. Present facts survive failure. Empty cannot finish as
+EOF after at least one packet, no recovery and no failure; tails, errors and
+early stops leave unseen records Unknown. Present facts survive failure. Empty cannot finish as
 Complete. Callers must feed all events and mark read errors/omissions incomplete.
 Sequence continuity remains slice7; no payload decoding/dependency is introduced.
 
@@ -40,3 +40,15 @@ Tests derive header facts from frozen 106-24R1 routing/layout evidence already
 recorded in provenance; budget/completion rules are owner policy, not IRIG limits.
 Local/CI commands and exact-head links belong in the PR. No version bump, release
 workflow, publication, merge or next-slice work is authorized here.
+
+PR8 review correction: tests-first 102464d reproduces a corrupt-checksum index
+between valid packets: accepted offsets/recovery counts (0,0), (56,28), (84,0).
+The index presence assertion fails at runtime (Absent instead of Unknown).
+Inspection now retains one sticky recovery flag; clean EOF still completes the
+scan, but unseen setup/index/events remain Unknown after any recovered bytes.
+The later unrecovered packet checks that the flag is never cleared; previously
+seen setup stays Present and accepted packet counts remain three. Separate
+index-only and event-only complete scans verify independent routing and absence.
+Two compiled mutation controls fail at runtime: replacing the sticky OR with
+assignment, and swapping index/event routing. Production source restored; all
+42 Rust tests and 20 compile-fail doctests pass, as do fmt and all-target clippy.

@@ -93,9 +93,9 @@ pub enum ScanStatus {
 pub enum Presence {
     /// Matching header was successfully accumulated.
     Present,
-    /// No matching header in a complete scan.
+    /// No matching header in a complete scan without recovered/skipped bytes.
     Absent,
-    /// No matching header, but scan is not complete.
+    /// No matching header, but scan is incomplete or includes recovered bytes.
     Unknown,
 }
 /// Presence facts derived without decoding setup/index/event payloads.
@@ -151,6 +151,7 @@ impl std::error::Error for InspectionError {}
 /// Inventory bounded by caller entry budgets plus 256 fixed data-type counters.
 /// Feed every event without filtering; call finish only on clean reader EOF,
 /// and mark_incomplete on reader error or early stop. Tails are sticky incomplete.
+/// Recovered bytes keep unseen presence facts Unknown even after clean EOF.
 #[derive(Debug)]
 pub struct Inspection {
     limits: InspectionLimits,
@@ -159,6 +160,7 @@ pub struct Inspection {
     rows: BTreeMap<(u16, u8), ChannelStats>,
     types: [Counts; 256],
     seen: [bool; 3],
+    saw_recovery: bool,
     status: ScanStatus,
 }
 impl Inspection {
@@ -171,6 +173,7 @@ impl Inspection {
             rows: BTreeMap::new(),
             types: [Counts::default(); 256],
             seen: [false; 3],
+            saw_recovery: false,
             status: ScanStatus::InProgress,
         }
     }
@@ -223,6 +226,7 @@ impl Inspection {
         self.seen[0] |= key == (0, 1);
         self.seen[1] |= key.1 == 3;
         self.seen[2] |= key.1 == 2;
+        self.saw_recovery |= packet.recovered_bytes > 0;
         Ok(())
     }
     /// Declare clean EOF. Empty inventory and any prior failure remain incomplete.
@@ -262,12 +266,12 @@ impl Inspection {
             .enumerate()
             .filter_map(|(code, &c)| (c.packets > 0).then_some((code as u8, c)))
     }
-    /// Observed headers survive incomplete scans; unseen records remain unknown.
+    /// Observed headers stay Present; incomplete or recovered scans cannot prove absence.
     pub fn presence(&self) -> PresenceFacts {
         let fact = |seen| {
             if seen {
                 Presence::Present
-            } else if self.status == ScanStatus::Complete {
+            } else if self.status == ScanStatus::Complete && !self.saw_recovery {
                 Presence::Absent
             } else {
                 Presence::Unknown

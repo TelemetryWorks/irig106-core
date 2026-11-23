@@ -20,4 +20,5 @@ and [proposed API](https://github.com/TelemetryWorks/irig106-core/blob/main/docs
 Inspection::new(InspectionLimits::new(channels, rows)) collects bounded header
 facts without payload/history retention. Feed every Event, finish only at clean
 EOF, and mark_incomplete on reader error/early stop. Missing records remain
-Unknown on incomplete scans; Present means observed headers, not valid content.
+Unknown on incomplete scans or after any recovery; Present means observed headers,
+not valid content. Clean EOF after recovery does not establish absence.
