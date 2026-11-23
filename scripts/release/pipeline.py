@@ -319,6 +319,28 @@ def registry_wait(directory, value):
     raise ValueError("Published crate did not appear within the bounded registry wait")
 
 
+def release_by_id(release_id, tag, title, body, *, require_draft=False):
+    if type(release_id) is not int or release_id <= 0:
+        raise ValueError("Invalid release ID")
+    # Match types #22: retry only ID visibility lag, never uncertain creation.
+    for attempt in range(5):
+        try:
+            release = json.loads(run("gh", "api", f"repos/{REPO}/releases/{release_id}",
+                                     stderr=subprocess.PIPE, timeout=30))
+            break
+        except subprocess.CalledProcessError as error:
+            if not re.search(r"\bHTTP 404\b", str(error.stderr or "")):
+                raise
+            if attempt == 4:
+                raise ValueError(f"Created draft {release_id} unavailable after 5 ID lookups") from error
+            time.sleep(2 ** attempt)
+    if (release["id"] != release_id or release["tag_name"] != tag or release["name"] != title
+            or (release.get("body") or "").replace("\r\n", "\n").strip() != body.strip()
+            or (require_draft and release.get("draft") is not True)):
+        raise ValueError("Release metadata differs from committed notes or created draft")
+    return release
+
+
 def release_assets(directory, value):
     root = Path(directory).resolve()
     verify_attestations(root, value)
@@ -331,33 +353,21 @@ def release_assets(directory, value):
     matches = [item for item in release_list() if item["tag_name"] == tag]
     if len(matches) > 1:
         raise ValueError("Multiple Releases for the tag")
+    body = notes.read_text()
     if matches:
-        existing = matches[0]
-        if existing["name"] != title or (existing.get("body") or "").replace("\r\n", "\n").strip() != notes.read_text().strip():
-            raise ValueError("Existing Release title/body differs from committed notes")
+        release_id = matches[0]["id"]
     else:
         prerelease, _ = latest_policy(value, [])
-        command = ["gh", "release", "create", tag, "--repo", REPO, "--verify-tag", "--draft",
-                   # Drafts cannot be Latest; select Latest explicitly when publishing below.
-                   "--latest=false", "--target", os.environ["RELEASE_COMMIT"],
-                   "--title", title, "--notes-file", str(notes)]
-        if prerelease:
-            command.append("--prerelease")
-        subprocess.run(command, check=True)
-    # Use the numeric release/asset APIs: tag lookup can hide a resumed draft.
-    if not matches:
-        # Creation can precede list visibility. Never create again while polling.
-        for attempt in range(5):
-            matches = [item for item in release_list() if item["tag_name"] == tag]
-            if matches:
-                break  # Ambiguous results still fail the uniqueness check below.
-            if attempt < 4:
-                time.sleep(2 ** attempt)
-    if len(matches) != 1:
-        raise ValueError("Created draft could not be uniquely identified")
-    release = matches[0]
-    if release["name"] != title or (release.get("body") or "").replace("\r\n", "\n").strip() != notes.read_text().strip():
-        raise ValueError("Release metadata differs from committed notes")
+        # Retain the create response ID: a new draft may be absent from lists.
+        created = json.loads(run("gh", "api", "-X", "POST", f"repos/{REPO}/releases",
+                                 "--input", "-", input=json.dumps({
+                                     "tag_name": tag, "target_commitish": os.environ["RELEASE_COMMIT"],
+                                     "name": title, "body": body, "draft": True,
+                                     "prerelease": prerelease, "make_latest": "false",
+                                 })))
+        release_id = created.get("id")
+    # Resume via the list, but attach/finalize only the retained numeric identity.
+    release = release_by_id(release_id, tag, title, body, require_draft=not matches)
     names = expected_files(value) | {"SHA256SUMS", bundle.name}
     assets = {asset["name"]: asset for asset in release["assets"]}
     if len(assets) != len(release["assets"]) or set(assets) - names:
@@ -378,6 +388,7 @@ def release_assets(directory, value):
     prerelease, latest = latest_policy(value, release_list())
     if tag_commit(tag) != os.environ["RELEASE_COMMIT"]:
         raise ValueError("Remote tag moved before publishing the release metadata")
+    release_by_id(release_id, tag, title, body)
     subprocess.run(["gh", "api", "--method", "PATCH", f"repos/{REPO}/releases/{release['id']}",
                     "--input", "-"], input=json.dumps({"draft": False, "prerelease": prerelease,
                                                      "make_latest": str(latest).lower()}),

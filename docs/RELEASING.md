@@ -81,10 +81,30 @@ crate, SBOM, SHA256SUMS and provenance sidecar, published the GitHub release and
 passed Verify publication. The successful crates.io upload was not rerun or
 changed; its bytes and tag were not replaced.
 
-For future releases, post-create discovery now performs at most five lookups,
-with 1/2/4/8-second backoff (15 seconds total scheduled delay). It creates the
-draft once; retries only discovery. Exhaustion or ambiguous matches fail before
-attachment/finalization. Existing-draft resume does not wait. Tests simulate an
-empty first post-create lookup followed by visibility, plus permanent absence;
-all mutation APIs and sleeps are mocked. This fix does not modify the v0.1.0 tag
-or its completed release.
+The initial fix (#14) bounded post-create list discovery to five lookups with
+1/2/4/8-second backoff. Future releases instead create the draft through
+`POST /repos/{owner}/{repo}/releases` with `draft=true` and `make_latest=false`,
+retain the response's numeric ID, and fetch `GET /repos/{owner}/{repo}/releases/{id}`
+before attachment and again before finalization. Each fetch checks the ID,
+tag, title and committed notes; the initial fetch also requires a new draft.
+Following [types #22](https://github.com/TelemetryWorks/irig106-types/pull/22),
+each ID fetch retries only HTTP 404: five attempts, 1/2/4/8-second backoff
+(15 seconds scheduled delay), and a 30-second timeout per call. Other errors
+propagate immediately; exhaustion fails closed. There is no post-create list
+lookup or second create attempt within the job, including after a failed ID
+fetch. The pre-finalization ID re-check uses the same bounded policy.
+
+The paginated list remains the resume path for an existing release (ambiguous
+matches fail closed), and determines Latest by semver. A rerun therefore still
+requires the existing release to be list-visible; the response ID is retained
+within the job, not persisted across runs. Rare edge: if the POST times out after
+GitHub created the draft, its ID is lost. A rerun relies on list-based resume;
+if that list is still stale, a second create can follow. Once both drafts are
+visible, discovery fails closed with `Multiple Releases for the tag`, requiring
+manual cleanup. Creation is never automatically retried within a job.
+
+Tests keep the list stale throughout creation/attachment/finalization and cover
+ID-lookup lag and exhaustion at both checkpoints, per-call timeouts, immediate
+propagation of other errors, resume, invalid IDs and changed metadata. All
+mutation APIs and sleeps are mocked. This follow-up does not modify the v0.1.0
+tag or its completed release.
