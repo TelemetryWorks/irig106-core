@@ -132,6 +132,61 @@ fn presence_is_header_evidence_and_scan_completion_is_explicit() {
 }
 
 #[test]
+fn mid_file_recovery_keeps_unseen_presence_unknown_after_clean_eof() {
+    let mut corrupt_index = frame(5, 3, 4);
+    corrupt_index[22] ^= 1; // Invalid primary checksum; reader must skip this index.
+    let b = [
+        frame(0, 1, 4),
+        corrupt_index,
+        frame(7, 9, 4),
+        frame(7, 9, 4), // A later unrecovered packet must not clear the evidence.
+    ]
+    .concat();
+    let mut r = PacketReader::new(&b[..], ReaderLimits::new()).unwrap();
+    let mut a = Inspection::new(InspectionLimits::new(2, 2));
+    let mut recovery = Vec::new();
+    while let Some(e) = r.next_packet(|_| 0).unwrap() {
+        match &e {
+            Event::Packet(p) => recovery.push((p.offset, p.recovered_bytes)),
+            _ => panic!("expected complete packets followed by clean EOF"),
+        }
+        a.observe(&e).unwrap();
+    }
+    assert_eq!(recovery, [(0, 0), (56, 28), (84, 0)]);
+    a.finish();
+    assert_eq!(a.status(), ScanStatus::Complete);
+    assert_eq!(a.totals().packets, 3);
+    let p = a.presence();
+    assert_eq!(p.setup_record, Presence::Present);
+    assert_eq!(p.recording_index, Presence::Unknown);
+    assert_eq!(p.recording_events, Presence::Unknown);
+}
+
+#[test]
+fn index_only_complete_scan_does_not_imply_events() {
+    let mut a = Inspection::new(InspectionLimits::new(1, 1));
+    a.observe(&event(5, 3, 4)).unwrap();
+    a.finish();
+    assert_eq!(a.status(), ScanStatus::Complete);
+    let p = a.presence();
+    assert_eq!(p.recording_index, Presence::Present);
+    assert_eq!(p.recording_events, Presence::Absent);
+    assert_eq!(p.setup_record, Presence::Absent);
+}
+
+#[test]
+fn events_only_complete_scan_does_not_imply_index() {
+    let mut a = Inspection::new(InspectionLimits::new(1, 1));
+    a.observe(&event(5, 2, 4)).unwrap();
+    a.finish();
+    assert_eq!(a.status(), ScanStatus::Complete);
+    let p = a.presence();
+    assert_eq!(p.recording_index, Presence::Absent);
+    assert_eq!(p.recording_events, Presence::Present);
+    assert_eq!(p.setup_record, Presence::Absent);
+}
+
+#[test]
 fn terminal_tail_cannot_be_overridden_by_finish() {
     let b = [frame(0, 1, 4), vec![0x25, 0xEB, 0]].concat();
     let mut r = PacketReader::new(&b[..], ReaderLimits::new()).unwrap();
