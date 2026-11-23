@@ -50,8 +50,13 @@ class WorkspaceContract(unittest.TestCase):
             ["cargo", "package", "-p", "irig106-core", "--list", "--locked",
              "--allow-dirty"], cwd=ROOT, text=True,
         ).splitlines()
-        for name in ["Cargo.toml", "Cargo.lock", "src/lib.rs", "README.md", "LICENSE"]:
-            self.assertIn(name, files)
+        expected = {".cargo_vcs_info.json", "Cargo.toml", "Cargo.toml.orig", "Cargo.lock", "README.md", "LICENSE"}
+        expected.update(f"src/{name}.rs" for name in
+                        ["lib", "header", "reader", "error", "integrity", "inspection", "sequence"])
+        expected.update(f"tests/{name}.rs" for name in
+                        ["primary_header", "reader", "completion", "integrity", "inspection", "sequence"])
+        expected.update(["examples/inspect.rs", "examples/rss_probe.rs"])
+        self.assertEqual(set(files), expected)
         self.assertEqual(
             hashlib.sha256((ROOT / "LICENSE").read_bytes()).digest(),
             hashlib.sha256((CRATE / "LICENSE").read_bytes()).digest(),

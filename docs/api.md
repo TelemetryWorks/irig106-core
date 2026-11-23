@@ -1,4 +1,4 @@
-# Proposed 0.1 API contract
+# Core 0.1 development API contract
 
 **Implemented in slice 2:** `Header::parse(&[u8])`, `primary_checksum(&[u8; 24])`,
 `HeaderError`, `PRIMARY_HEADER_LEN` and re-exported shared `Rtc`. `Header` stores
@@ -173,3 +173,16 @@ and discontinuities. An expected successor with nonzero skipped_since_previous
 is Unverified, never Contiguous. Recovery does not reset sequence state. Sequence evidence does not
 prove loss, identity, content validity or a recording reset; no missing-count
 estimate or severity is assigned. See [migration](migration.md) and its examples.
+
+## Verification and release boundary
+
+The virtual-workspace library remains unreleased development at 0.0.1. CI checks
+the exact crate file list and runs cargo package with archive verification; the
+inspect example executes against piped fixtures. A separate Linux CI job measures
+only the prebuilt release core driver using GNU time, outside fixture generation
+and compilation, with a 32 MiB peak-RSS ceiling. The input includes a complete
+64 MiB packet with 4-byte capture (L1-CORE-002) and 48 MiB mid-file recovery
+(L2-REC-003), plus dense small packets and padding. See [slice 8](verification-s08.md)
+for input parameters and negative control. These checks do not establish whole
+recording conformance, validate payload/checksum contents, or authorize release.
+Trusted Publishing adoption remains slice 9 with a separately authorized release.

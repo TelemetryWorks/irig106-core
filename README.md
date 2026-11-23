@@ -19,7 +19,7 @@ has one library. Published `irig106-types` 0.1 (defaults disabled) is its sole
 dependency, supplying the shared `Rtc`; no payload interpretation is performed.
 
 - [Requirements and nine-slice plan](docs/requirements.md)
-- [Proposed API and boundary behavior](docs/api.md)
+- [Development API and boundary behavior](docs/api.md)
 - [Consumer migration contract and examples](docs/migration.md)
 - [Seed provenance and slice 1 verification](docs/provenance.md)
 - [Organization contributor guidance](https://github.com/TelemetryWorks/.github/blob/main/CONTRIBUTING.md)
@@ -33,11 +33,15 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
-CI also checks Rust 1.85, Linux/macOS/Windows, docs, packaged-source builds and
+CI also checks Rust 1.85, Linux/macOS/Windows, docs, exact package file lists,
+verified packaged-source builds, executed public examples and
 `cargo deny check` (deny.toml: advisories, licences, bans and registry-only sources).
-Use light focused local checks with `CARGO_BUILD_JOBS=2`; large generated-input
-RSS checks belong to CI in slice 8. No throughput or memory measurement is
-claimed by this scaffold. no_std/alloc and packet-data checksum validation are
+Use light focused local checks with `CARGO_BUILD_JOBS=2`. The CI-only
+[isolated RSS gate](docs/verification-s08.md) measures a release reader/inventory
+process on a 240 MiB fixture with a 32 MiB ceiling, including a complete 64 MiB
+packet (4-byte capture) and a 48 MiB mid-file recovery gap. Separate one-off
+controls check packet-sized draining and recovery retention. This is scoped regression evidence, not a universal memory
+or throughput guarantee. no_std/alloc and packet-data checksum validation are
 tracked follow-ups, not 0.1 features.
 
 No release is authorized. Slice 9 must adopt the organization
