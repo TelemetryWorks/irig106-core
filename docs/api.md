@@ -148,4 +148,28 @@ any accepted packet with recovered_bytes > 0 prevents absence claims even after
 later unrecovered packets and clean EOF (ScanStatus may still be Complete).
 Previously observed Present facts survive incomplete or recovered scans. The
 caller must mark read errors or omitted input explicitly.
-Sequence continuity and user-facing reports remain later work.
+User-facing reports remain downstream work.
+
+## Sequence observations
+
+observe_with_sequence(&Event) shares observe's transactional update, returning
+Result<Option<SequenceObservation>, InspectionError>. Feed each event once to
+either method. Packets return Some; tails return None. Both keep a last u8 and
+recovery checkpoint per channel inside the existing bounded channel map,
+independent of raw data type. One checked u64 stream recovery total is shared.
+No sequence history, diagnostic list or separate unbounded channel state exists.
+
+SequenceObservation exposes channel, packet offset, previous/observed sequence
+and recovered_bytes (this packet's incident). skipped_since_previous counts ALL
+stream recoveries since this channel's previous accepted packet, including skips
+attached to other channels. It is zero for First because there is no previous
+interval. Each accepted packet resets only its channel's checkpoint; cumulative
+u64 overflow returns CountOverflow before any state change. expected() returns
+the previous value plus one modulo 256, or None on first observation. kind() is
+First, Contiguous, Unverified, Duplicate or
+Discontinuity; new evidence/enums are non-exhaustive. The initial byte need not
+be zero. Every accepted packet becomes the next reference, including duplicates
+and discontinuities. An expected successor with nonzero skipped_since_previous
+is Unverified, never Contiguous. Recovery does not reset sequence state. Sequence evidence does not
+prove loss, identity, content validity or a recording reset; no missing-count
+estimate or severity is assigned. See [migration](migration.md) and its examples.

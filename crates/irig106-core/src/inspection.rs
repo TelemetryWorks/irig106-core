@@ -1,9 +1,6 @@
 //! Bounded header inventory. No payload bytes, packet history or diagnostics.
-use crate::{Event, Header, Packet};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt,
-};
+use crate::{Event, Header, Packet, SequenceObservation};
+use std::{collections::BTreeMap, fmt};
 
 /// Explicit entry budgets; zero permits no entries. No preallocation occurs.
 /// ```compile_fail,E0639
@@ -148,6 +145,12 @@ impl fmt::Display for InspectionError {
 }
 impl std::error::Error for InspectionError {}
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ChannelSequence {
+    last: u8,
+    skipped_checkpoint: u64,
+}
+
 /// Inventory bounded by caller entry budgets plus 256 fixed data-type counters.
 /// Feed every event without filtering; call finish only on clean reader EOF,
 /// and mark_incomplete on reader error or early stop. Tails are sticky incomplete.
@@ -156,7 +159,8 @@ impl std::error::Error for InspectionError {}
 pub struct Inspection {
     limits: InspectionLimits,
     totals: Counts,
-    channels: BTreeSet<u16>,
+    channels: BTreeMap<u16, ChannelSequence>,
+    skipped_bytes: u64,
     rows: BTreeMap<(u16, u8), ChannelStats>,
     types: [Counts; 256],
     seen: [bool; 3],
@@ -169,7 +173,8 @@ impl Inspection {
         Self {
             limits,
             totals: Counts::default(),
-            channels: BTreeSet::new(),
+            channels: BTreeMap::new(),
+            skipped_bytes: 0,
             rows: BTreeMap::new(),
             types: [Counts::default(); 256],
             seen: [false; 3],
@@ -179,14 +184,22 @@ impl Inspection {
     }
     /// Accept a complete packet or terminal tail. Errors stop further observation.
     pub fn observe(&mut self, event: &Event) -> Result<(), InspectionError> {
+        self.observe_with_sequence(event).map(|_| ())
+    }
+    /// Accept once, returning sequence evidence for packets and None for tails.
+    /// Shares all counts, limits and failure rules with observe; do not feed twice.
+    pub fn observe_with_sequence(
+        &mut self,
+        event: &Event,
+    ) -> Result<Option<SequenceObservation>, InspectionError> {
         let result = if self.status != ScanStatus::InProgress {
             Err(InspectionError::Stopped)
         } else {
             match event {
-                Event::Packet(p) => self.record(p),
+                Event::Packet(p) => self.record(p).map(Some),
                 Event::Tail { .. } => {
                     self.mark_incomplete();
-                    Ok(())
+                    Ok(None)
                 }
             }
         };
@@ -195,10 +208,10 @@ impl Inspection {
         }
         result
     }
-    fn record(&mut self, packet: &Packet) -> Result<(), InspectionError> {
+    fn record(&mut self, packet: &Packet) -> Result<SequenceObservation, InspectionError> {
         let h = &packet.header;
         let key = (h.channel(), h.data_type());
-        if !self.channels.contains(&key.0) && self.channels.len() >= self.limits.max_channels {
+        if !self.channels.contains_key(&key.0) && self.channels.len() >= self.limits.max_channels {
             return Err(InspectionError::ChannelLimit {
                 limit: self.limits.max_channels,
             });
@@ -209,6 +222,10 @@ impl Inspection {
             });
         }
         // Compute every fallible value before changing any inventory state.
+        let skipped_bytes = self
+            .skipped_bytes
+            .checked_add(packet.recovered_bytes)
+            .ok_or(InspectionError::CountOverflow)?;
         let totals = self.totals.after(h)?;
         let type_counts = self.types[key.1 as usize].after(h)?;
         let old = self.rows.get(&key).copied();
@@ -219,7 +236,23 @@ impl Inspection {
             max_data_length: old
                 .map_or(h.data_length(), |r| r.max_data_length.max(h.data_length())),
         };
-        self.channels.insert(key.0);
+        let previous = self.channels.get(&key.0);
+        let sequence = SequenceObservation {
+            channel: key.0,
+            offset: packet.offset,
+            previous: previous.map(|s| s.last),
+            observed: h.sequence(),
+            recovered_bytes: packet.recovered_bytes,
+            skipped_since_previous: previous.map_or(0, |s| skipped_bytes - s.skipped_checkpoint),
+        };
+        self.channels.insert(
+            key.0,
+            ChannelSequence {
+                last: sequence.observed,
+                skipped_checkpoint: skipped_bytes,
+            },
+        );
+        self.skipped_bytes = skipped_bytes;
         self.rows.insert(key, row);
         self.totals = totals;
         self.types[key.1 as usize] = type_counts;
@@ -227,7 +260,7 @@ impl Inspection {
         self.seen[1] |= key.1 == 3;
         self.seen[2] |= key.1 == 2;
         self.saw_recovery |= packet.recovered_bytes > 0;
-        Ok(())
+        Ok(sequence)
     }
     /// Declare clean EOF. Empty inventory and any prior failure remain incomplete.
     pub fn finish(&mut self) {
@@ -301,6 +334,15 @@ mod tests {
             .next_packet(|_| 0)
             .unwrap()
             .unwrap();
+        let mut next = b;
+        next[13] = 1;
+        next[23] = 0xF5; // Sequence1 adds 0100 to the independent F445 checksum.
+        let recovered = [&[0xFF][..], &next[..]].concat();
+        let rejected = PacketReader::new(&recovered[..], ReaderLimits::new())
+            .unwrap()
+            .next_packet(|_| 0)
+            .unwrap()
+            .unwrap();
         for scope in 0..3 {
             for field in 0..3 {
                 let mut a = Inspection::new(InspectionLimits::new(1, 1));
@@ -315,13 +357,59 @@ mod tests {
                     1 => counts.data_bytes = u64::MAX,
                     _ => counts.packet_bytes = u64::MAX,
                 };
-                let before = (a.totals, a.types[9], a.rows[&(0, 9)]);
-                assert_eq!(a.observe(&e), Err(InspectionError::CountOverflow));
-                assert_eq!((a.totals, a.types[9], a.rows[&(0, 9)]), before);
+                let before = (a.totals, a.types[9], a.rows[&(0, 9)], a.skipped_bytes);
+                let channels_before = a.channels.clone();
+                assert_eq!(a.observe(&rejected), Err(InspectionError::CountOverflow));
+                assert_eq!(
+                    (a.totals, a.types[9], a.rows[&(0, 9)], a.skipped_bytes),
+                    before
+                );
+                assert_eq!(a.channels, channels_before);
                 assert_eq!((a.channel_count(), a.rows().count()), (1, 1));
                 a.finish();
                 assert_eq!(a.status(), ScanStatus::Incomplete);
             }
         }
+    }
+
+    #[test]
+    fn cumulative_skipped_bytes_accept_exact_max_then_reject_atomically() {
+        let mut b = [
+            0x25, 0xEB, 0, 0, 28, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0x45, 0xF4, 1,
+            2, 3, 4,
+        ];
+        let e = PacketReader::new(&b[..], ReaderLimits::new())
+            .unwrap()
+            .next_packet(|_| 0)
+            .unwrap()
+            .unwrap();
+        let mut a = Inspection::new(InspectionLimits::new(1, 1));
+        a.observe(&e).unwrap();
+        a.skipped_bytes = u64::MAX - 1;
+        a.channels.get_mut(&0).unwrap().skipped_checkpoint = u64::MAX - 1;
+        b[13] = 1;
+        b[23] = 0xF5;
+        let input = [&[0xFF][..], &b[..]].concat();
+        let e = PacketReader::new(&input[..], ReaderLimits::new())
+            .unwrap()
+            .next_packet(|_| 0)
+            .unwrap()
+            .unwrap();
+        let s = a.observe_with_sequence(&e).unwrap().unwrap();
+        assert_eq!(
+            (a.skipped_bytes, s.skipped_since_previous, s.kind()),
+            (u64::MAX, 1, crate::SequenceKind::Unverified)
+        );
+        let before = (a.totals, a.types[9], a.rows[&(0, 9)], a.channels.clone());
+        assert_eq!(
+            a.observe_with_sequence(&e),
+            Err(InspectionError::CountOverflow)
+        );
+        assert_eq!(
+            (a.totals, a.types[9], a.rows[&(0, 9)], a.channels.clone()),
+            before
+        );
+        assert_eq!(a.skipped_bytes, u64::MAX);
+        assert_eq!(a.status(), ScanStatus::Incomplete);
     }
 }
