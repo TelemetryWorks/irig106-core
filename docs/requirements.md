@@ -23,6 +23,13 @@ Sources: **S** = 106-24R1 Chapter 11 §§11.2.1.1–11.2.1.2, as recorded in
 adoption of their semantic/report requirements. Standard page inspection and
 new checksum oracles must be recorded before claiming new wire-rule verification.
 
+## Proposed 0.2 revision (pending owner approval)
+
+[Slice-1 design](design-0.2.md) proposes exact replacements for L1-CORE-002,
+L2-IO-002 and L2-CAP-002, with admission/budget/RSS obligations. The rows below
+remain the approved 0.1 contract; the proposal does not claim implementation or
+verification credit, and does not relax the existing bounded-capture RSS gate.
+
 ## L1: responsibilities
 
 | ID | Obligation | Source |
