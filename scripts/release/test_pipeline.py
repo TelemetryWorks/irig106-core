@@ -368,6 +368,15 @@ class ReleaseControls(unittest.TestCase):
         self.assertEqual(len(self.release_mutations.call_args_list), 4)
         self.assertTrue(all("POST" in c.args[0] for c in self.release_mutations.call_args_list))
 
+    def test_id_lookup_rejects_wrong_identity_or_new_release_state(self):
+        for change in [{"id": 11}, {"tag_name": "other"}, {"name": "other"},
+                       {"body": "other"}, {"draft": False}]:
+            with self.subTest(change=change), patch.object(pipeline, "gh_api", side_effect=lambda path: dict(self.release_metadata, **change)), \
+                 self.assertRaisesRegex(ValueError, "Release metadata"):
+                self.release_case(new=True, missing=True)
+            self.assertEqual(len(self.release_creations), 1)
+            self.release_mutations.assert_not_called()
+
     def test_single_crate_manifest_scope(self):
         Path("Cargo.toml").write_text('[workspace]\nmembers=["crates/irig106-core"]\n[workspace.package]\nversion="0.2.0"\n')
         manifest = Path("crates/irig106-core/Cargo.toml")
@@ -413,6 +422,8 @@ class ReleaseControls(unittest.TestCase):
     def test_resumed_draft_uses_numeric_api(self):
         calls = self.release_case(draft=True)
         self.release_sleeps.assert_not_called()
+        self.assertEqual(self.release_creations, [])
+        self.assertEqual(self.release_id_reads, [f"repos/{pipeline.REPO}/releases/10"] * 2)
         self.assertEqual(len(calls), 1)
         self.assertIn("PATCH", calls[0].args[0])
         self.assertIn("releases/10", calls[0].args[0][-3])
