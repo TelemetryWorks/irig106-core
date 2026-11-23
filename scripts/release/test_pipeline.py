@@ -274,7 +274,7 @@ class ReleaseControls(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Release gate rejected"):
             self.tag_run(api_commit="c" * 40)
 
-    def release_case(self, *, moved=False, wrong_body=False, mismatch=False, missing=False, draft=False, new=False, invalid_assets=None, moved_after_assets=False, other_releases=()):
+    def release_case(self, *, moved=False, wrong_body=False, mismatch=False, missing=False, draft=False, new=False, invalid_assets=None, moved_after_assets=False, other_releases=(), post_create_lag=0):
         bundle = f"irig106-core-{self.value}.crates.intoto.jsonl"
         (self.artifacts / bundle).write_text('{}\n')
         path = self.make_record()
@@ -290,7 +290,7 @@ class ReleaseControls(unittest.TestCase):
         def fake_run(*args, **kwargs):
             if args[0] == "gh":
                 reads.append(True)
-                return json.dumps([list(other_releases) if new and len(reads) == 1 else [metadata, *other_releases]])
+                return json.dumps([list(other_releases) if new and len(reads) <= 1 + post_create_lag else [metadata, *other_releases]])
             return path.read_text().strip()
         def asset_bytes(args, **kwargs):
             index = int(args[2].rsplit("/", 1)[1])
@@ -300,10 +300,13 @@ class ReleaseControls(unittest.TestCase):
              patch.object(pipeline, "tag_commit", return_value=("b" if moved else "a") * 40,
                           side_effect=["a" * 40, "b" * 40] if moved_after_assets else None) as tags, \
              patch.object(pipeline, "run", side_effect=fake_run), \
+             patch.object(pipeline.time, "sleep") as sleeps, \
              patch.object(pipeline.subprocess, "check_output", side_effect=asset_bytes), \
              patch.object(pipeline.subprocess, "run") as mutations:
             self.release_mutations = mutations
             self.release_tag_checks = tags
+            self.release_sleeps = sleeps
+            self.release_reads = reads
             pipeline.release_assets(self.artifacts, self.value)
             signatures.assert_called_once_with(self.artifacts.resolve(), self.value)
             return mutations.call_args_list
@@ -316,6 +319,22 @@ class ReleaseControls(unittest.TestCase):
         self.assertIn("--notes-file", command)
         self.assertIn("--draft", command)
         self.assertIn("PATCH", calls[-1].args[0])
+
+    def test_post_create_lookup_retries_read_after_write_lag(self):
+        calls = self.release_case(new=True, missing=True, post_create_lag=1)
+        self.assertEqual(len(self.release_reads), 4)  # Initial, empty, visible, Latest.
+        self.release_sleeps.assert_called_once_with(1)
+        self.assertEqual(sum(c.args[0][:3] == ["gh", "release", "create"] for c in calls), 1)
+        self.assertEqual(sum("POST" in c.args[0] for c in calls), 4)
+        self.assertIn("PATCH", calls[-1].args[0])
+
+    def test_post_create_lookup_exhaustion_stops_before_assets(self):
+        with self.assertRaisesRegex(ValueError, "Created draft could not be uniquely identified"):
+            self.release_case(new=True, missing=True, post_create_lag=100)
+        self.assertEqual(len(self.release_reads), 6)  # Initial plus five bounded lookups.
+        self.assertEqual([c.args[0] for c in self.release_sleeps.call_args_list], [1, 2, 4, 8])
+        self.assertEqual(len(self.release_mutations.call_args_list), 1)
+        self.assertEqual(self.release_mutations.call_args.args[0][:3], ["gh", "release", "create"])
 
     def test_single_crate_manifest_scope(self):
         Path("Cargo.toml").write_text('[workspace]\nmembers=["crates/irig106-core"]\n[workspace.package]\nversion="0.2.0"\n')
