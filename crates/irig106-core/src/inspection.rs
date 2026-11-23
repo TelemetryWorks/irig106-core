@@ -1,9 +1,6 @@
 //! Bounded header inventory. No payload bytes, packet history or diagnostics.
-use crate::{Event, Header, Packet};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt,
-};
+use crate::{Event, Header, Packet, SequenceObservation};
+use std::{collections::BTreeMap, fmt};
 
 /// Explicit entry budgets; zero permits no entries. No preallocation occurs.
 /// ```compile_fail,E0639
@@ -156,7 +153,7 @@ impl std::error::Error for InspectionError {}
 pub struct Inspection {
     limits: InspectionLimits,
     totals: Counts,
-    channels: BTreeSet<u16>,
+    channels: BTreeMap<u16, u8>,
     rows: BTreeMap<(u16, u8), ChannelStats>,
     types: [Counts; 256],
     seen: [bool; 3],
@@ -169,7 +166,7 @@ impl Inspection {
         Self {
             limits,
             totals: Counts::default(),
-            channels: BTreeSet::new(),
+            channels: BTreeMap::new(),
             rows: BTreeMap::new(),
             types: [Counts::default(); 256],
             seen: [false; 3],
@@ -179,14 +176,22 @@ impl Inspection {
     }
     /// Accept a complete packet or terminal tail. Errors stop further observation.
     pub fn observe(&mut self, event: &Event) -> Result<(), InspectionError> {
+        self.observe_with_sequence(event).map(|_| ())
+    }
+    /// Accept once, returning sequence evidence for packets and None for tails.
+    /// Shares all counts, limits and failure rules with observe; do not feed twice.
+    pub fn observe_with_sequence(
+        &mut self,
+        event: &Event,
+    ) -> Result<Option<SequenceObservation>, InspectionError> {
         let result = if self.status != ScanStatus::InProgress {
             Err(InspectionError::Stopped)
         } else {
             match event {
-                Event::Packet(p) => self.record(p),
+                Event::Packet(p) => self.record(p).map(Some),
                 Event::Tail { .. } => {
                     self.mark_incomplete();
-                    Ok(())
+                    Ok(None)
                 }
             }
         };
@@ -195,10 +200,10 @@ impl Inspection {
         }
         result
     }
-    fn record(&mut self, packet: &Packet) -> Result<(), InspectionError> {
+    fn record(&mut self, packet: &Packet) -> Result<SequenceObservation, InspectionError> {
         let h = &packet.header;
         let key = (h.channel(), h.data_type());
-        if !self.channels.contains(&key.0) && self.channels.len() >= self.limits.max_channels {
+        if !self.channels.contains_key(&key.0) && self.channels.len() >= self.limits.max_channels {
             return Err(InspectionError::ChannelLimit {
                 limit: self.limits.max_channels,
             });
@@ -219,7 +224,14 @@ impl Inspection {
             max_data_length: old
                 .map_or(h.data_length(), |r| r.max_data_length.max(h.data_length())),
         };
-        self.channels.insert(key.0);
+        let sequence = SequenceObservation {
+            channel: key.0,
+            offset: packet.offset,
+            previous: self.channels.get(&key.0).copied(),
+            observed: h.sequence(),
+            recovered_bytes: packet.recovered_bytes,
+        };
+        self.channels.insert(key.0, sequence.observed);
         self.rows.insert(key, row);
         self.totals = totals;
         self.types[key.1 as usize] = type_counts;
@@ -227,7 +239,7 @@ impl Inspection {
         self.seen[1] |= key.1 == 3;
         self.seen[2] |= key.1 == 2;
         self.saw_recovery |= packet.recovered_bytes > 0;
-        Ok(())
+        Ok(sequence)
     }
     /// Declare clean EOF. Empty inventory and any prior failure remain incomplete.
     pub fn finish(&mut self) {
@@ -301,6 +313,14 @@ mod tests {
             .next_packet(|_| 0)
             .unwrap()
             .unwrap();
+        let mut next = b;
+        next[13] = 1;
+        next[23] = 0xF5; // Sequence1 adds 0100 to the independent F445 checksum.
+        let rejected = PacketReader::new(&next[..], ReaderLimits::new())
+            .unwrap()
+            .next_packet(|_| 0)
+            .unwrap()
+            .unwrap();
         for scope in 0..3 {
             for field in 0..3 {
                 let mut a = Inspection::new(InspectionLimits::new(1, 1));
@@ -316,8 +336,10 @@ mod tests {
                     _ => counts.packet_bytes = u64::MAX,
                 };
                 let before = (a.totals, a.types[9], a.rows[&(0, 9)]);
-                assert_eq!(a.observe(&e), Err(InspectionError::CountOverflow));
+                let channels_before = a.channels.clone();
+                assert_eq!(a.observe(&rejected), Err(InspectionError::CountOverflow));
                 assert_eq!((a.totals, a.types[9], a.rows[&(0, 9)]), before);
+                assert_eq!(a.channels, channels_before);
                 assert_eq!((a.channel_count(), a.rows().count()), (1, 1));
                 a.finish();
                 assert_eq!(a.status(), ScanStatus::Incomplete);

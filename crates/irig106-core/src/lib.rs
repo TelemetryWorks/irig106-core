@@ -2,8 +2,24 @@
 //!
 //! Primary framing and bounded streaming capture using the 106-24R1 layout.
 //! Includes typed completion/errors, optional recovery limits, secondary checksum
-//! evidence, trailer ranges and bounded header inventory. No payload meaning or
+//! evidence, trailer ranges, bounded header inventory and per-channel sequence
+//! comparisons. No payload meaning or
 //! full recording validation.
+//!
+//! A payload consumer can request a bounded prefix and check completeness before
+//! decoding. The following independent frame declares four DATA bytes:
+//! ```
+//! use irig106_core::{Event, PacketReader, ReaderLimits};
+//! let bytes = [0x25,0xEB,0,0,28,0,0,0,4,0,0,0,0,0,0,9,0,0,0,0,0,0,0x45,0xF4,1,2,3,4];
+//! let mut reader = PacketReader::new(&bytes[..], ReaderLimits::new().with_capture_bytes(4))?;
+//! match reader.next_packet(|_| 4)? {
+//!     Some(Event::Packet(packet)) if packet.body_prefix.len() == packet.header.data_length() as usize => {
+//!         assert_eq!(packet.body_prefix, [1,2,3,4]); // Complete DATA, still uninterpreted.
+//!     }
+//!     _ => panic!("fixture must deliver complete DATA"),
+//! }
+//! # Ok::<(), irig106_core::Error>(())
+//! ```
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -13,6 +29,7 @@ mod header;
 mod inspection;
 mod integrity;
 mod reader;
+mod sequence;
 
 pub use error::{Error, ErrorKind, Recovery, Tail};
 pub use header::{Header, HeaderError, PRIMARY_HEADER_LEN, primary_checksum};
@@ -23,3 +40,4 @@ pub use inspection::{
 pub use integrity::{DataChecksumState, PacketRanges, SecondaryIntegrity};
 pub use irig106_types::Rtc;
 pub use reader::{Event, Packet, PacketReader, ReaderLimits, TailKind};
+pub use sequence::{SequenceKind, SequenceObservation};

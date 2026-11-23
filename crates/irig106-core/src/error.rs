@@ -37,7 +37,7 @@ pub struct Tail {
 #[non_exhaustive]
 pub enum ErrorKind {
     /// Original operational read failure.
-    /// ```compile_fail
+    /// ```compile_fail,E0638
     /// use irig106_core::ErrorKind;
     /// fn closed(reason: ErrorKind) { if let ErrorKind::Io { source: _ } = reason {} }
     /// ```
@@ -47,7 +47,7 @@ pub enum ErrorKind {
         source: io::Error,
     },
     /// Checksum-qualified impossible primary framing.
-    /// ```compile_fail
+    /// ```compile_fail,E0638
     /// use irig106_core::ErrorKind;
     /// fn closed(reason: ErrorKind) { if let ErrorKind::Header { source: _ } = reason {} }
     /// ```
@@ -57,7 +57,7 @@ pub enum ErrorKind {
         source: HeaderError,
     },
     /// EOF without a single completely consumed frame.
-    /// ```compile_fail
+    /// ```compile_fail,E0638
     /// use irig106_core::ErrorKind;
     /// fn closed(reason: ErrorKind) { if let ErrorKind::NoCompletePacket { tail: _ } = reason {} }
     /// ```
@@ -67,7 +67,7 @@ pub enum ErrorKind {
         tail: Option<Tail>,
     },
     /// Caller's inclusive candidate-displacement budget was exhausted.
-    /// ```compile_fail
+    /// ```compile_fail,E0638
     /// use irig106_core::ErrorKind;
     /// fn closed(reason: ErrorKind) { if let ErrorKind::RecoveryLimit { limit: _ } = reason {} }
     /// ```
@@ -79,7 +79,7 @@ pub enum ErrorKind {
     /// Zero buffered-input capacity.
     InvalidBuffer,
     /// Requested DATA prefix exceeds the caller's capture bound.
-    /// ```compile_fail
+    /// ```compile_fail,E0638
     /// use irig106_core::ErrorKind;
     /// fn closed(reason: ErrorKind) { if let ErrorKind::CaptureLimit { requested: _, limit: _ } = reason {} }
     /// ```
@@ -91,7 +91,7 @@ pub enum ErrorKind {
         limit: usize,
     },
     /// Bounded DATA capture allocation failed.
-    /// ```compile_fail
+    /// ```compile_fail,E0638
     /// use irig106_core::ErrorKind;
     /// fn closed(reason: ErrorKind) { if let ErrorKind::Allocation { source: _ } = reason {} }
     /// ```
