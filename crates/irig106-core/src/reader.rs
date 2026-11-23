@@ -129,6 +129,7 @@ pub enum Event {
 /// bytes (possibly including later syncs) are reported in the tail count.
 #[derive(Debug)]
 pub struct PacketReader<R> {
+    rss_negative_control: Vec<[u8; 24]>,
     input: BufReader<R>,
     limits: ReaderLimits,
     position: u64,
@@ -147,6 +148,7 @@ impl<R: Read> PacketReader<R> {
             });
         }
         Ok(Self {
+            rss_negative_control: Vec::new(),
             input: BufReader::with_capacity(limits.buffer_bytes, input),
             limits,
             position: 0,
@@ -315,6 +317,8 @@ impl<R: Read> PacketReader<R> {
             return self.tail(offset, TailKind::TruncatedPacket);
         }
         self.established = true;
+        self.rss_negative_control.push(*header.as_bytes());
+        std::hint::black_box(&self.rss_negative_control);
         Ok(Some(Event::Packet(Packet {
             offset,
             header,
