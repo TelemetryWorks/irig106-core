@@ -274,7 +274,7 @@ class ReleaseControls(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Release gate rejected"):
             self.tag_run(api_commit="c" * 40)
 
-    def release_case(self, *, moved=False, wrong_body=False, mismatch=False, missing=False, draft=False, new=False, invalid_assets=None, moved_after_assets=False, other_releases=(), post_create_lag=0):
+    def release_case(self, *, moved=False, wrong_body=False, mismatch=False, missing=False, draft=False, new=False, invalid_assets=None, moved_after_assets=False, other_releases=(), post_create_lag=0, created_id=10):
         bundle = f"irig106-core-{self.value}.crates.intoto.jsonl"
         (self.artifacts / bundle).write_text('{}\n')
         path = self.make_record()
@@ -287,10 +287,19 @@ class ReleaseControls(unittest.TestCase):
         elif invalid_assets == "duplicate":
             metadata["assets"].append(dict(metadata["assets"][0], id=99))
         reads = []
+        self.release_creations = []
+        self.release_id_reads = []
+        self.release_metadata = metadata
         def fake_run(*args, **kwargs):
             if args[0] == "gh":
+                if "-X" in args and args[args.index("-X") + 1] == "POST":
+                    self.release_creations.append((args, kwargs))
+                    return json.dumps({"id": created_id})
+                if "/releases/" in args[-1] and args[-1].rsplit("/", 1)[-1].isdigit():
+                    self.release_id_reads.append(args[-1])
+                    return json.dumps(metadata)
                 reads.append(True)
-                return json.dumps([list(other_releases) if new and len(reads) <= 1 + post_create_lag else [metadata, *other_releases]])
+                return json.dumps([list(other_releases) if new and (len(reads) == 1 or post_create_lag) else [metadata, *other_releases]])
             return path.read_text().strip()
         def asset_bytes(args, **kwargs):
             index = int(args[2].rsplit("/", 1)[1])
@@ -313,35 +322,51 @@ class ReleaseControls(unittest.TestCase):
 
     def test_new_release_requires_existing_tag_and_committed_notes(self):
         calls = self.release_case(new=True)
-        command = calls[0].args[0]
-        self.assertEqual(command[:3], ["gh", "release", "create"])
-        self.assertIn("--verify-tag", command)
-        self.assertIn("--notes-file", command)
-        self.assertIn("--draft", command)
+        args, kwargs = self.release_creations[0]
+        self.assertEqual(args, ("gh", "api", "-X", "POST", f"repos/{pipeline.REPO}/releases", "--input", "-"))
+        self.assertEqual(json.loads(kwargs["input"]), {
+            "tag_name": "v0.2.0", "target_commitish": "a" * 40,
+            "name": "irig106-core 0.2.0", "body": self.make_record().read_text(),
+            "draft": True, "prerelease": False, "make_latest": "false",
+        })
+        self.assertEqual(self.release_tag_checks.call_count, 2)
         self.assertIn("PATCH", calls[-1].args[0])
 
-    def test_post_create_lookup_retries_read_after_write_lag(self):
-        calls = self.release_case(new=True, missing=True, post_create_lag=1)
-        self.assertEqual(len(self.release_reads), 4)  # Initial, empty, visible, Latest.
-        self.release_sleeps.assert_called_once_with(1)
-        self.assertEqual(sum(c.args[0][:3] == ["gh", "release", "create"] for c in calls), 1)
-        self.assertEqual(sum("POST" in c.args[0] for c in calls), 4)
-        self.assertIn("PATCH", calls[-1].args[0])
-
-    def test_post_create_lookup_exhaustion_stops_before_assets(self):
-        with self.assertRaisesRegex(ValueError, "Created draft could not be uniquely identified"):
-            self.release_case(new=True, missing=True, post_create_lag=100)
-        self.assertEqual(len(self.release_reads), 6)  # Initial plus five bounded lookups.
-        self.assertEqual([c.args[0] for c in self.release_sleeps.call_args_list], [1, 2, 4, 8])
-        self.assertEqual(len(self.release_mutations.call_args_list), 1)
-        self.assertEqual(self.release_mutations.call_args.args[0][:3], ["gh", "release", "create"])
-
-    def test_post_create_ambiguity_fails_without_retry_or_attachment(self):
-        with patch.object(pipeline, "release_list", side_effect=[[], [{"tag_name": "v0.2.0"}] * 2]), \
-             self.assertRaisesRegex(ValueError, "Created draft could not be uniquely identified"):
-            self.release_case(new=True, missing=True)
+    def test_creation_id_works_when_releases_list_stays_stale(self):
+        calls = self.release_case(new=True, missing=True, post_create_lag=100)
+        self.assertEqual(len(self.release_reads), 2)  # Resume discovery and Latest only.
         self.release_sleeps.assert_not_called()
-        self.assertEqual(len(self.release_mutations.call_args_list), 1)  # Creation only.
+        self.assertEqual(len(self.release_creations), 1)
+        self.assertEqual(self.release_id_reads, [f"repos/{pipeline.REPO}/releases/10"] * 2)
+        self.assertEqual(sum("POST" in c.args[0] for c in calls), 4)
+        self.assertTrue(all("releases/10/" in c.args[0][4] for c in calls[:-1]))
+        self.assertIn("releases/10", calls[-1].args[0][-3])
+
+    def test_missing_or_unsafe_creation_id_stops_before_assets(self):
+        for value in [None, "10", True, 0, -1]:
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "release ID"):
+                self.release_case(new=True, missing=True, created_id=value)
+            self.assertEqual(len(self.release_creations), 1)
+            self.assertEqual(self.release_id_reads, [])
+            self.release_mutations.assert_not_called()
+
+    def test_resume_ambiguity_fails_before_creation_or_attachment(self):
+        with patch.object(pipeline, "release_list", return_value=[{"tag_name": "v0.2.0"}] * 2), \
+             self.assertRaisesRegex(ValueError, "Multiple Releases"):
+            self.release_case(new=True, missing=True)
+        self.assertEqual(self.release_creations, [])
+        self.release_mutations.assert_not_called()
+
+    def test_changed_id_metadata_blocks_finalization(self):
+        reads = []
+        def fetch(path):
+            reads.append(path)
+            return dict(self.release_metadata, tag_name="other") if len(reads) == 2 else self.release_metadata
+        with patch.object(pipeline, "gh_api", side_effect=fetch), self.assertRaisesRegex(ValueError, "Release metadata"):
+            self.release_case(new=True, missing=True)
+        self.assertEqual(reads, [f"repos/{pipeline.REPO}/releases/10"] * 2)
+        self.assertEqual(len(self.release_mutations.call_args_list), 4)
+        self.assertTrue(all("POST" in c.args[0] for c in self.release_mutations.call_args_list))
 
     def test_single_crate_manifest_scope(self):
         Path("Cargo.toml").write_text('[workspace]\nmembers=["crates/irig106-core"]\n[workspace.package]\nversion="0.2.0"\n')
@@ -423,7 +448,7 @@ class ReleaseControls(unittest.TestCase):
         next(self.artifacts.glob('*.crate')).rename(self.artifacts / self.crate)
         self.manifest()
         calls = self.release_case(new=True)
-        self.assertIn("--prerelease", calls[0].args[0])
+        self.assertTrue(json.loads(self.release_creations[0][1]["input"])["prerelease"])
         payload = json.loads(calls[-1].kwargs["input"])
         self.assertTrue(payload["prerelease"])
         self.assertEqual(payload["make_latest"], "false")
