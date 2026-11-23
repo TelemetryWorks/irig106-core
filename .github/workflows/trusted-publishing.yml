@@ -97,6 +97,10 @@ jobs:
         run: |
           cargo +"$RELEASE_RUST_VERSION" package -p irig106-core --locked --list
           cargo +"$RELEASE_RUST_VERSION" package -p irig106-core --locked
+      - name: Audit packaged dependency policy before approval
+        uses: EmbarkStudios/cargo-deny-action@70f81531115945ba6eb6b941ec9d39d063438eb9 # v2.1.2
+        with:
+          arguments: --locked --all-features
       - name: Install pinned CycloneDX generator
         run: cargo +"$RELEASE_RUST_VERSION" install cargo-cyclonedx --version 0.5.9 --locked
       - name: Assemble frozen release payload
