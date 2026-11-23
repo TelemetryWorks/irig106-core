@@ -9,11 +9,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         .with_capture_bytes(4);
     let mut reader = PacketReader::new(File::open(path)?, limits)?;
     let mut inventory = Inspection::new(InspectionLimits::new(1, 1));
+    let mut max_packet = 0;
     let (mut recoveries, mut recovered, mut tail, mut tail_scanned, mut unverified) =
         (0u64, 0u64, 0u64, 0u64, 0u64);
     while let Some(event) = reader.next_packet(|_| 4)? {
         if let Event::Packet(p) = &event {
             assert_eq!(p.body_prefix, [1, 2, 3, 4]);
+            max_packet = max_packet.max(p.header.packet_length());
         }
         if let Some(sequence) = inventory.observe_with_sequence(&event)? {
             if sequence.recovered_bytes > 0 {
@@ -36,7 +38,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     inventory.finish();
     let c = inventory.totals();
     println!(
-        "packets={} data_bytes={} packet_bytes={} recoveries={recoveries} recovered={recovered} tail={tail} tail_scanned={tail_scanned} unverified={unverified} status={:?}",
+        "packets={} data_bytes={} packet_bytes={} recoveries={recoveries} recovered={recovered} tail={tail} tail_scanned={tail_scanned} unverified={unverified} max_packet={max_packet} status={:?}",
         c.packets,
         c.data_bytes,
         c.packet_bytes,
