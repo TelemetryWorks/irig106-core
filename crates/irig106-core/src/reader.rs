@@ -85,6 +85,7 @@ pub struct Packet {
 /// fn closed(value: TailKind) { match value { TailKind::PartialHeader => (), TailKind::TruncatedPacket => (), TailKind::Unsynchronized => () } }
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TailKind {
     /// Fewer than 24 primary bytes at EOF.
     PartialHeader,
@@ -99,6 +100,7 @@ pub enum TailKind {
 /// fn closed(value: Event) { match value { Event::Packet(_) => (), Event::Tail { .. } => () } }
 /// ```
 #[derive(Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Event {
     /// A completely consumed frame, with optional bounded DATA capture.
     Packet(Packet),
@@ -263,7 +265,7 @@ impl<R: Read> PacketReader<R> {
             match Header::parse(&b) {
                 Ok(header) => break header,
                 Err(HeaderError::InvalidSync { .. } | HeaderError::ChecksumMismatch { .. }) => (),
-                Err(error) => return Err(ErrorKind::Header(error)),
+                Err(error) => return Err(ErrorKind::Header { source: error }),
             }
             let recovery = self.recovery.get_or_insert(Recovery {
                 start_offset: start,
@@ -283,7 +285,8 @@ impl<R: Read> PacketReader<R> {
             }
         };
         let offset = self.position - 24;
-        let ranges = PacketRanges::from_header(&header).map_err(ErrorKind::Header)?;
+        let ranges =
+            PacketRanges::from_header(&header).map_err(|source| ErrorKind::Header { source })?;
         let wanted = capture(&header).min(header.data_length() as usize);
         if wanted > self.limits.capture_bytes {
             return Err(ErrorKind::CaptureLimit {
@@ -303,7 +306,7 @@ impl<R: Read> PacketReader<R> {
         let mut body_prefix = Vec::new();
         body_prefix
             .try_reserve_exact(wanted)
-            .map_err(ErrorKind::Allocation)?;
+            .map_err(|source| ErrorKind::Allocation { source })?;
         body_prefix.resize(wanted, 0);
         if self.read_counted(&mut body_prefix)? != wanted
             || !self
@@ -321,6 +324,16 @@ impl<R: Read> PacketReader<R> {
             body_prefix,
             recovered_bytes: offset - start,
         })))
+    }
+}
+
+impl std::fmt::Display for TailKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::PartialHeader => "partial header",
+            Self::TruncatedPacket => "truncated packet",
+            Self::Unsynchronized => "unsynchronized data",
+        })
     }
 }
 

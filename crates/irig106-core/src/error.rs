@@ -39,20 +39,29 @@ pub enum ErrorKind {
     /// Original operational read failure.
     /// ```compile_fail
     /// use irig106_core::ErrorKind;
-    /// fn closed(reason: ErrorKind) { if let ErrorKind::Io(_) = reason {} }
+    /// fn closed(reason: ErrorKind) { if let ErrorKind::Io { source: _ } = reason {} }
     /// ```
-    Io(io::Error),
+    #[non_exhaustive]
+    Io {
+        /// Original typed cause.
+        source: io::Error,
+    },
     /// Checksum-qualified impossible primary framing.
     /// ```compile_fail
     /// use irig106_core::ErrorKind;
-    /// fn closed(reason: ErrorKind) { if let ErrorKind::Header(_) = reason {} }
+    /// fn closed(reason: ErrorKind) { if let ErrorKind::Header { source: _ } = reason {} }
     /// ```
-    Header(HeaderError),
+    #[non_exhaustive]
+    Header {
+        /// Original typed cause.
+        source: HeaderError,
+    },
     /// EOF without a single completely consumed frame.
     /// ```compile_fail
     /// use irig106_core::ErrorKind;
     /// fn closed(reason: ErrorKind) { if let ErrorKind::NoCompletePacket { tail: _ } = reason {} }
     /// ```
+    #[non_exhaustive]
     NoCompletePacket {
         /// Available tail evidence, absent for empty input.
         tail: Option<Tail>,
@@ -62,6 +71,7 @@ pub enum ErrorKind {
     /// use irig106_core::ErrorKind;
     /// fn closed(reason: ErrorKind) { if let ErrorKind::RecoveryLimit { limit: _ } = reason {} }
     /// ```
+    #[non_exhaustive]
     RecoveryLimit {
         /// Explicit caller cap; never a default limit.
         limit: u64,
@@ -73,6 +83,7 @@ pub enum ErrorKind {
     /// use irig106_core::ErrorKind;
     /// fn closed(reason: ErrorKind) { if let ErrorKind::CaptureLimit { requested: _, limit: _ } = reason {} }
     /// ```
+    #[non_exhaustive]
     CaptureLimit {
         /// Requested size after clamping to Data Length.
         requested: usize,
@@ -82,16 +93,20 @@ pub enum ErrorKind {
     /// Bounded DATA capture allocation failed.
     /// ```compile_fail
     /// use irig106_core::ErrorKind;
-    /// fn closed(reason: ErrorKind) { if let ErrorKind::Allocation(_) = reason {} }
+    /// fn closed(reason: ErrorKind) { if let ErrorKind::Allocation { source: _ } = reason {} }
     /// ```
-    Allocation(TryReserveError),
+    #[non_exhaustive]
+    Allocation {
+        /// Original typed cause.
+        source: TryReserveError,
+    },
     /// Advancing the consumed byte offset would exceed u64.
     OffsetOverflow,
 }
 
 impl From<io::Error> for ErrorKind {
     fn from(error: io::Error) -> Self {
-        Self::Io(error)
+        Self::Io { source: error }
     }
 }
 
@@ -114,27 +129,35 @@ impl Error {
     /// Broad I/O classification retained for callers of the promoted seed.
     pub fn kind(&self) -> io::ErrorKind {
         match &self.reason {
-            ErrorKind::Io(error) => error.kind(),
+            ErrorKind::Io { source: error } => error.kind(),
             ErrorKind::InvalidBuffer | ErrorKind::CaptureLimit { .. } => {
                 io::ErrorKind::InvalidInput
             }
-            ErrorKind::Allocation(_) => io::ErrorKind::Other,
+            ErrorKind::Allocation { source: _ } => io::ErrorKind::Other,
             _ => io::ErrorKind::InvalidData,
         }
     }
     /// Underlying typed header, I/O or allocation error, when present.
     pub fn get_ref(&self) -> Option<&(dyn StdError + Send + Sync + 'static)> {
         match &self.reason {
-            ErrorKind::Io(error) => Some(error),
-            ErrorKind::Header(error) => Some(error),
-            ErrorKind::Allocation(error) => Some(error),
+            ErrorKind::Io { source: error } => Some(error),
+            ErrorKind::Header { source: error } => Some(error),
+            ErrorKind::Allocation { source: error } => Some(error),
             _ => None,
         }
     }
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "packet reader at {}: {}", self.position, self.reason)
+        write!(f, "packet reader at {}: {}", self.position, self.reason)?;
+        if let Some(r) = self.recovery {
+            write!(
+                f,
+                "; recovery started at {}, scanned {} bytes",
+                r.start_offset, r.scanned_bytes
+            )?;
+        }
+        Ok(())
     }
 }
 impl StdError for Error {
@@ -146,9 +169,15 @@ impl StdError for Error {
 impl fmt::Display for ErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Io(error) => write!(f, "input read failed: {error}"),
-            Self::Header(error) => write!(f, "invalid packet framing: {error}"),
-            Self::NoCompletePacket { .. } => f.write_str("no complete Chapter 10 packet found"),
+            Self::Io { source: error } => write!(f, "input read failed: {error}"),
+            Self::Header { source: error } => write!(f, "invalid packet framing: {error}"),
+            Self::NoCompletePacket { tail } => {
+                f.write_str("no complete Chapter 10 packet found")?;
+                if let Some(t) = tail {
+                    write!(f, ": {} at {} ({} bytes)", t.kind, t.offset, t.bytes)?;
+                }
+                Ok(())
+            }
             Self::RecoveryLimit { limit } => {
                 write!(f, "recovery search exhausted caller limit of {limit} bytes")
             }
@@ -157,8 +186,63 @@ impl fmt::Display for ErrorKind {
                 f,
                 "requested DATA prefix {requested} bytes exceeds capture limit {limit} bytes"
             ),
-            Self::Allocation(error) => write!(f, "could not allocate DATA prefix: {error}"),
+            Self::Allocation { source: error } => {
+                write!(f, "could not allocate DATA prefix: {error}")
+            }
             Self::OffsetOverflow => f.write_str("input byte offset exceeds u64 range"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn every_error_reason_has_human_display() {
+        for (reason, text) in [
+            (
+                ErrorKind::Io {
+                    source: io::Error::new(io::ErrorKind::PermissionDenied, "reader blocked"),
+                },
+                "input read failed: reader blocked",
+            ),
+            (
+                ErrorKind::Header {
+                    source: HeaderError::UnalignedPacket { length: 30 },
+                },
+                "invalid packet framing: packet length 30 is not divisible by four",
+            ),
+            (
+                ErrorKind::NoCompletePacket { tail: None },
+                "no complete Chapter 10 packet found",
+            ),
+            (
+                ErrorKind::RecoveryLimit { limit: 7 },
+                "recovery search exhausted caller limit of 7 bytes",
+            ),
+            (
+                ErrorKind::InvalidBuffer,
+                "reader buffer must contain at least one byte",
+            ),
+            (
+                ErrorKind::CaptureLimit {
+                    requested: 5,
+                    limit: 4,
+                },
+                "requested DATA prefix 5 bytes exceeds capture limit 4 bytes",
+            ),
+            (
+                ErrorKind::OffsetOverflow,
+                "input byte offset exceeds u64 range",
+            ),
+        ] {
+            assert_eq!(reason.to_string(), text);
+        }
+        let allocation = Vec::<u8>::new().try_reserve(usize::MAX).unwrap_err(); // No allocation attempted.
+        assert!(
+            ErrorKind::Allocation { source: allocation }
+                .to_string()
+                .starts_with("could not allocate DATA prefix: ")
+        );
     }
 }

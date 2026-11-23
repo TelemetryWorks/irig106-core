@@ -6,7 +6,8 @@ Slice 4 adds typed completion, optional recovery caps and terminal evidence,
 including checked offset-overflow unit coverage. See [slice 2](verification-s02.md),
 [slice 3](verification-s03.md) and [slice 4](verification-s04.md) clause evidence.
 Slice 5 adds secondary checksum/reserved evidence and trailer ranges; see
-[clause evidence](verification-s05.md). Inspection remains planned; allocation-failure
+[clause evidence](verification-s05.md). Slice 6 adds bounded inventory/presence facts ([evidence](verification-s06.md));
+sequence continuity remains planned. Allocation-failure
 handling is typed but no process-OOM test is claimed. No whole-recording or
 whole-standard conformance is asserted.
 

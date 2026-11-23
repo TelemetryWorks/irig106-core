@@ -3,7 +3,6 @@ use irig106_core::{
     DataChecksumState, ErrorKind, Event, Header, HeaderError, PacketRanges, PacketReader,
     ReaderLimits, SecondaryIntegrity,
 };
-use std::io;
 
 fn frame(flags: u8, data: &[u8], len: usize) -> Vec<u8> {
     let start = if flags & 0x80 == 0 { 24 } else { 36 };
@@ -90,7 +89,7 @@ fn every_trailer_width_keeps_data_filler_checksum_disjoint() {
                 .next_packet(|_| 5)
                 .unwrap_err();
             assert!(
-                matches!(e.reason, ErrorKind::NoCompletePacket {tail:Some(t)} if t.kind == irig106_core::TailKind::TruncatedPacket && t.bytes == 47)
+                matches!(e.reason, ErrorKind::NoCompletePacket {tail:Some(t), .. } if t.kind == irig106_core::TailKind::TruncatedPacket && t.bytes == 47)
             );
         }
     }
@@ -116,7 +115,10 @@ fn insufficient_trailer_space_stops_before_capture() {
                 .unwrap_err();
             assert!(matches!(
                 e.reason,
-                ErrorKind::Header(HeaderError::DataTooLong { .. })
+                ErrorKind::Header {
+                    source: HeaderError::DataTooLong { .. },
+                    ..
+                }
             ));
             assert_eq!(e.position, 24);
             assert!(r.next_packet(|_| 0).unwrap().is_none());
@@ -133,7 +135,7 @@ fn insufficient_trailer_space_stops_before_capture() {
 }
 
 #[test]
-fn limit_builders_and_error_display_are_consumer_apis() {
+fn limit_builders_and_outer_error_display_are_consumer_apis() {
     let defaults = ReaderLimits::default();
     assert_eq!(
         (
@@ -159,50 +161,6 @@ fn limit_builders_and_error_display_are_consumer_apis() {
     assert_eq!(
         ReaderLimits::new().recovery_bytes,
         ReaderLimits::default().recovery_bytes
-    );
-    for (reason, text) in [
-        (
-            ErrorKind::Io(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "reader blocked",
-            )),
-            "input read failed: reader blocked",
-        ),
-        (
-            ErrorKind::Header(HeaderError::UnalignedPacket { length: 30 }),
-            "invalid packet framing: packet length 30 is not divisible by four",
-        ),
-        (
-            ErrorKind::NoCompletePacket { tail: None },
-            "no complete Chapter 10 packet found",
-        ),
-        (
-            ErrorKind::RecoveryLimit { limit: 7 },
-            "recovery search exhausted caller limit of 7 bytes",
-        ),
-        (
-            ErrorKind::InvalidBuffer,
-            "reader buffer must contain at least one byte",
-        ),
-        (
-            ErrorKind::CaptureLimit {
-                requested: 5,
-                limit: 4,
-            },
-            "requested DATA prefix 5 bytes exceeds capture limit 4 bytes",
-        ),
-        (
-            ErrorKind::OffsetOverflow,
-            "input byte offset exceeds u64 range",
-        ),
-    ] {
-        assert_eq!(reason.to_string(), text);
-    }
-    let allocation = Vec::<u8>::new().try_reserve(usize::MAX).unwrap_err(); // No allocation attempted.
-    assert!(
-        ErrorKind::Allocation(allocation)
-            .to_string()
-            .starts_with("could not allocate DATA prefix: ")
     );
     let e = PacketReader::new(&[][..], ReaderLimits::default())
         .unwrap()

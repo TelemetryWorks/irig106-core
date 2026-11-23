@@ -7,6 +7,8 @@ header/checksum parser and the promoted bounded reader under
 caps (default None), secondary integrity evidence and checked trailer ranges.
 Packet-data checksum contents remain NotChecked. The manifest is still 0.0.1;
 no new version is published. Configure ReaderLimits with new()/Default and builders.
+Bounded Inspection adds complete-frame totals, raw type/channel rows and
+completion-qualified presence facts with explicit channel/row budgets.
 
 The virtual workspace uses edition 2024, MSRV 1.85 and Apache-2.0. It currently
 has one library. Published `irig106-types` 0.1 (defaults disabled) is its sole
