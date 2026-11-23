@@ -274,7 +274,7 @@ class ReleaseControls(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Release gate rejected"):
             self.tag_run(api_commit="c" * 40)
 
-    def release_case(self, *, moved=False, wrong_body=False, mismatch=False, missing=False, draft=False, new=False, invalid_assets=None, moved_after_assets=False, other_releases=(), post_create_lag=0, created_id=10):
+    def release_case(self, *, moved=False, wrong_body=False, mismatch=False, missing=False, draft=False, new=False, invalid_assets=None, moved_after_assets=False, other_releases=(), post_create_lag=0, created_id=10, id_errors=None, id_changes=None):
         bundle = f"irig106-core-{self.value}.crates.intoto.jsonl"
         (self.artifacts / bundle).write_text('{}\n')
         path = self.make_record()
@@ -289,6 +289,7 @@ class ReleaseControls(unittest.TestCase):
         reads = []
         self.release_creations = []
         self.release_id_reads = []
+        self.release_id_options = []
         self.release_metadata = metadata
         def fake_run(*args, **kwargs):
             if args[0] == "gh":
@@ -297,7 +298,11 @@ class ReleaseControls(unittest.TestCase):
                     return json.dumps({"id": created_id})
                 if "/releases/" in args[-1] and args[-1].rsplit("/", 1)[-1].isdigit():
                     self.release_id_reads.append(args[-1])
-                    return json.dumps(metadata)
+                    self.release_id_options.append(kwargs)
+                    index = len(self.release_id_reads)
+                    if index in (id_errors or {}):
+                        raise id_errors[index]
+                    return json.dumps(dict(metadata, **(id_changes or {}).get(index, {})))
                 reads.append(True)
                 return json.dumps([list(other_releases) if new and (len(reads) == 1 or post_create_lag) else [metadata, *other_releases]])
             return path.read_text().strip()
@@ -358,23 +363,63 @@ class ReleaseControls(unittest.TestCase):
         self.release_mutations.assert_not_called()
 
     def test_changed_id_metadata_blocks_finalization(self):
-        reads = []
-        def fetch(path):
-            reads.append(path)
-            return dict(self.release_metadata, tag_name="other") if len(reads) == 2 else self.release_metadata
-        with patch.object(pipeline, "gh_api", side_effect=fetch), self.assertRaisesRegex(ValueError, "Release metadata"):
-            self.release_case(new=True, missing=True)
-        self.assertEqual(reads, [f"repos/{pipeline.REPO}/releases/10"] * 2)
+        with self.assertRaisesRegex(ValueError, "Release metadata"):
+            self.release_case(new=True, missing=True, id_changes={2: {"tag_name": "other"}})
+        self.assertEqual(self.release_id_reads, [f"repos/{pipeline.REPO}/releases/10"] * 2)
         self.assertEqual(len(self.release_mutations.call_args_list), 4)
         self.assertTrue(all("POST" in c.args[0] for c in self.release_mutations.call_args_list))
 
     def test_id_lookup_rejects_wrong_identity_or_new_release_state(self):
         for change in [{"id": 11}, {"tag_name": "other"}, {"name": "other"},
                        {"body": "other"}, {"draft": False}]:
-            with self.subTest(change=change), patch.object(pipeline, "gh_api", side_effect=lambda path: dict(self.release_metadata, **change)), \
-                 self.assertRaisesRegex(ValueError, "Release metadata"):
-                self.release_case(new=True, missing=True)
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, "Release metadata"):
+                self.release_case(new=True, missing=True, id_changes={1: change})
             self.assertEqual(len(self.release_creations), 1)
+            self.release_mutations.assert_not_called()
+
+    def id_not_found(self):
+        return subprocess.CalledProcessError(1, "gh api", stderr="gh: Not Found (HTTP 404)")
+
+    def assert_id_lookup_options(self):
+        self.assertTrue(self.release_id_options)
+        self.assertTrue(all(options == {"stderr": subprocess.PIPE, "timeout": 30}
+                            for options in self.release_id_options))
+
+    def test_id_lookup_lag_retries_only_get_before_attach_and_finalize(self):
+        # First GET lags; the pre-finalization re-check also lags independently.
+        calls = self.release_case(new=True, missing=True, post_create_lag=100,
+                                  id_errors={1: self.id_not_found(), 3: self.id_not_found()})
+        self.assertEqual(len(self.release_creations), 1)
+        self.assertEqual(self.release_id_reads, [f"repos/{pipeline.REPO}/releases/10"] * 4)
+        self.assertEqual([c.args for c in self.release_sleeps.call_args_list], [(1,), (1,)])
+        self.assert_id_lookup_options()
+        self.assertEqual(len(calls), 5)
+        self.assertIn("PATCH", calls[-1].args[0])
+
+    def test_id_lookup_exhaustion_stops_before_assets_or_finalize(self):
+        for start in [1, 2]:
+            with self.subTest(start=start), self.assertRaisesRegex(ValueError, "unavailable after 5 ID lookups"):
+                self.release_case(new=True, missing=True,
+                                  id_errors={n: self.id_not_found() for n in range(start, start + 5)})
+            self.assertEqual(len(self.release_creations), 1)
+            self.assertEqual(len(self.release_id_reads), start + 4)
+            self.assertEqual([c.args for c in self.release_sleeps.call_args_list], [(1,), (2,), (4,), (8,)])
+            self.assert_id_lookup_options()
+            self.assertEqual(len(self.release_mutations.call_args_list), 0 if start == 1 else 4)
+            self.assertTrue(all("POST" in c.args[0] for c in self.release_mutations.call_args_list))
+
+    def test_id_lookup_other_errors_propagate_without_retry(self):
+        for error in [subprocess.CalledProcessError(1, "gh api", stderr="HTTP 403 Forbidden"),
+                      subprocess.CalledProcessError(1, "gh api", stderr="HTTP 500 Internal Server Error"),
+                      subprocess.CalledProcessError(1, "gh api", stderr="HTTP 4040"),
+                      subprocess.TimeoutExpired("gh api", 30)]:
+            with self.subTest(error=error), self.assertRaises(type(error)) as raised:
+                self.release_case(new=True, missing=True, id_errors={1: error})
+            self.assertIs(raised.exception, error)
+            self.assertEqual(len(self.release_creations), 1)
+            self.assertEqual(len(self.release_id_reads), 1)
+            self.assert_id_lookup_options()
+            self.release_sleeps.assert_not_called()
             self.release_mutations.assert_not_called()
 
     def test_single_crate_manifest_scope(self):
