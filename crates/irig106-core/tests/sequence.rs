@@ -55,6 +55,7 @@ fn interleaved_channels_share_sequence_across_types_and_wrap() {
             (ch, i as u64 * 28, seq, 0)
         );
         assert_eq!((s.previous, s.expected(), s.kind()), (previous, next, kind));
+        assert_eq!(s.skipped_since_previous, 0);
     }
     assert!(r.next_packet(|_| 0).unwrap().is_none());
     assert_eq!(
@@ -112,6 +113,10 @@ fn successor_after_four_kib_recovery_is_not_contiguous() {
         (Some(8), Some(9), 9, 4096)
     );
     assert_ne!(s.kind(), SequenceKind::Contiguous);
+    assert_eq!(
+        (s.skipped_since_previous, s.kind()),
+        (4096, SequenceKind::Unverified)
+    );
 }
 
 #[test]
@@ -131,6 +136,10 @@ fn recovery_attached_to_other_channel_prevents_contiguous() {
         .unwrap()
         .unwrap();
     assert_eq!((other.channel, other.recovered_bytes), (2, 4096));
+    assert_eq!(
+        (other.skipped_since_previous, other.kind()),
+        (0, SequenceKind::First)
+    );
     let s = a
         .observe_with_sequence(&r.next_packet(|_| 0).unwrap().unwrap())
         .unwrap()
@@ -146,6 +155,58 @@ fn recovery_attached_to_other_channel_prevents_contiguous() {
         (1, Some(5), Some(6), 6, 0)
     );
     assert_ne!(s.kind(), SequenceKind::Contiguous);
+    assert_eq!(
+        (s.skipped_since_previous, s.kind()),
+        (4096, SequenceKind::Unverified)
+    );
+}
+
+#[test]
+fn all_recoveries_accumulate_until_each_channels_next_packet() {
+    use SequenceKind::{Contiguous, First, Unverified};
+    let input = [
+        (1, 5, 0),
+        (2, 40, 2),
+        (3, 50, 3),
+        (2, 41, 4),
+        (1, 6, 5),
+        (1, 7, 0),
+        (2, 42, 1),
+        (2, 43, 0),
+    ];
+    let b: Vec<_> = input
+        .iter()
+        .flat_map(|&(c, s, skip)| [vec![0xFF; skip], frame(c, 9, s)].concat())
+        .collect();
+    let mut r = PacketReader::new(&b[..], ReaderLimits::new()).unwrap();
+    let mut a = Inspection::new(InspectionLimits::new(3, 3));
+    for ((ch, _, recovered), (offset, skipped, kind)) in input.into_iter().zip([
+        (0, 0, First),
+        (30, 0, First),
+        (61, 0, First),
+        (93, 7, Unverified),
+        (126, 14, Unverified),
+        (154, 0, Contiguous),
+        (183, 6, Unverified),
+        (211, 0, Contiguous),
+    ]) {
+        let s = a
+            .observe_with_sequence(&r.next_packet(|_| 0).unwrap().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (
+                s.channel,
+                s.offset,
+                s.recovered_bytes,
+                s.skipped_since_previous,
+                s.kind()
+            ),
+            (ch, offset, recovered as u64, skipped, kind)
+        );
+    }
+    assert!(r.next_packet(|_| 0).unwrap().is_none());
+    assert_eq!((a.channel_count(), a.totals().packets), (3, 8));
 }
 
 #[test]

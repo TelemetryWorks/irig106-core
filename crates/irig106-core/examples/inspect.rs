@@ -16,14 +16,17 @@ fn main() -> ExitCode {
         match reader.next_packet(|_| 0) {
             Ok(Some(event)) => match inventory.observe_with_sequence(&event) {
                 Ok(Some(s)) => match s.kind() {
-                    SequenceKind::Duplicate | SequenceKind::Discontinuity => eprintln!(
-                        "channel {} at {}: {:?}, previous {:?}, observed {}, recovered {} bytes",
+                    SequenceKind::Duplicate
+                    | SequenceKind::Discontinuity
+                    | SequenceKind::Unverified => eprintln!(
+                        "channel {} at {}: {:?}, previous {:?}, observed {}, recovered {} bytes, skipped_since_previous={}",
                         s.channel,
                         s.offset,
                         s.kind(),
                         s.previous,
                         s.observed,
-                        s.recovered_bytes
+                        s.recovered_bytes,
+                        s.skipped_since_previous
                     ),
                     _ => {}
                 },

@@ -27,3 +27,5 @@ observe_with_sequence returns one per-channel comparison without retaining a
 history; 255-to-0 wraps, and discontinuities are observations rather than loss
 estimates. See the [migration contract](https://github.com/TelemetryWorks/irig106-core/blob/main/docs/migration.md)
 and `cargo run -p irig106-core --example inspect --locked < recording.ch10`.
+Expected successors after skipped input are Unverified; skipped_since_previous
+includes every stream recovery since that channel's prior packet.

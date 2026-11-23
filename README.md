@@ -11,6 +11,8 @@ Bounded Inspection adds complete-frame totals, raw type/channel rows and
 completion-qualified presence facts with explicit channel/row budgets.
 Per-channel sequence comparisons include wrap and preserve recovery evidence;
 discontinuities do not prove packet loss.
+An expected successor after skipped input is Unverified; per-channel recovery
+intervals include skips attached to other channels.
 
 The virtual workspace uses edition 2024, MSRV 1.85 and Apache-2.0. It currently
 has one library. Published `irig106-types` 0.1 (defaults disabled) is its sole

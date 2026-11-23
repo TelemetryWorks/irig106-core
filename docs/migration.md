@@ -22,6 +22,17 @@ default features off; it re-exports the same Rtc vocabulary.
 | Payload capture | body_prefix contains DATA only. Compare captured length with Data Length before a complete-body decoder. Filler/trailer are drained. |
 | Time/integrity | Primary RTC survives secondary checksum findings. Secondary bytes remain raw; packet-data checksums are Absent/NotChecked, never claimed Valid. |
 
+Concrete source edits for seed consumers:
+
+- Replace header field reads with accessors: channel(), packet_length(),
+  data_length(), data_type_version(), sequence(), flags() and data_type().
+  For example, `packet.header.sequence` becomes `packet.header.sequence()`.
+- Replace `Rtc::from_le_bytes(packet.header.rtc)` with `packet.header.rtc()`;
+  use `packet.header.rtc_bytes()` only when raw six-byte evidence is needed.
+- Add a `_` arm to matches over Event and TailKind; both are non-exhaustive.
+- Add `..` to Event::Tail field patterns, for example
+  `Event::Tail { offset, bytes, kind, .. }`.
+
 When time resumes, it should remove its duplicate transport, retain the seed
 regressions and re-run its command-level exit/report and content-vs-structure
 checks against the published core. Core's checks do not substitute for those
@@ -47,7 +58,11 @@ Each channel has its own sequence across all types. The initial value is
 arbitrary; subsequent expected values wrap modulo 256. Duplicate means repeated
 sequence byte, not identical packet content. Discontinuity is an observation,
 not a lost-packet estimate or reset/recording-boundary decision. Comparisons
-continue across recovery and expose skipped-byte evidence. Filtering, reordering,
+continue across recovery. skipped_since_previous sums every stream recovery
+since that channel's prior accepted packet, including skips attached to other
+channels; recovered_bytes describes only the current packet's incident. An
+expected successor after any such skipped input is Unverified, never Contiguous.
+First has no prior interval and reports zero skipped_since_previous. Filtering, reordering,
 resets and multiples of 256 missing packets can defeat naive loss inference.
 
 The archived ch10-reader supplies feature requirements, not a compatible API.
