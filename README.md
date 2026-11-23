@@ -1,12 +1,12 @@
 # irig106-core
 
 Chapter 10 packet finding and structural checking for the TelemetryWorks IRIG 106
-ecosystem. Unreleased development toward 0.1 currently provides a primary
+ecosystem. Version 0.1.0 provides a primary
 header/checksum parser and the promoted bounded reader under
 `crates/irig106-core`, with typed completion/errors and optional caller recovery
 caps (default None), secondary integrity evidence and checked trailer ranges.
-Packet-data checksum contents remain NotChecked. The manifest is still 0.0.1;
-no new version is published. Configure ReaderLimits with new()/Default and builders.
+Packet-data checksum contents are reported NotChecked.
+Configure ReaderLimits with new()/Default and builders.
 Bounded Inspection adds complete-frame totals, raw type/channel rows and
 completion-qualified presence facts with explicit channel/row budgets.
 Per-channel sequence comparisons include wrap and preserve recovery evidence;
@@ -46,6 +46,6 @@ tracked follow-ups, not 0.1 features.
 
 The base [Trusted Publishing pipeline](docs/RELEASING.md) supplies six release
 jobs and a read-only PR/manual Publish path dry run. Its known-good comparison
-uses published core 0.0.1; development artifacts are unsigned. Adoption requires
-review and passing CI and authorizes no tag or release. Publishing remains
-OIDC-only in crates-io, with owner approval and a separate release decision.
+uses published core 0.0.1; PR dry-run artifacts are unsigned. Release preparation
+requires review and passing CI. Tagging and publishing remain separately controlled,
+with OIDC-only publication in crates-io, owner approval and a separate release decision.

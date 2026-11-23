@@ -13,7 +13,10 @@
 - Add bounded counts, raw data-type and presence facts, and per-channel sequence
   observations with wrap and recovery-qualified continuity.
 - Reuse irig106-types 0.1 and its Rtc type. Target std, Rust edition 2024 and
-  MSRV 1.85; payload interpretation, packet-data checksum validation and
-  no_std/alloc support remain outside 0.1.
+  MSRV 1.85. Packet-data checksum contents are reported NotChecked; payload
+  interpretation, checksum-content validation and no_std/alloc support remain
+  outside 0.1.
 - Add reviewed Trusted Publishing preparation, verified package checks and
-  CI-only isolated RSS regression probes.
+  CI-only isolated RSS probes as scoped regression evidence, not a general
+  memory guarantee.
+- 0.1.0 supersedes the 0.0.1 name placeholder.

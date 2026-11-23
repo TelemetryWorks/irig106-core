@@ -1,10 +1,12 @@
 # Core release pipeline
 
-This adopts the **base** [org standard at 2adedc5](https://github.com/TelemetryWorks/.github/blob/2adedc5aaf27b7bafb54ad05a51bc17d89b65d3e/docs/TRUSTED-PUBLISHING.md),
-which retains the fcceb02 requirements. It is one adoption PR, not authorization
-to publish 0.1.0, re-tag or replace the 0.0.1 placeholder. No settings are changed.
-The manifest stays 0.0.1. Adoption is complete only after independent exact-head
-review, passing PR dry run and owner merge.
+The repository uses the **base** [org standard at 2adedc5](https://github.com/TelemetryWorks/.github/blob/2adedc5aaf27b7bafb54ad05a51bc17d89b65d3e/docs/TRUSTED-PUBLISHING.md),
+which retains the fcceb02 requirements, adopted in reviewed PR12.
+The manifest selects 0.1.0. Release preparation requires independent exact-head
+review, a passing PR dry run and owner merge. After the owner confirms Trusted
+Publisher settings, the coordinator pushes the annotated tag and the owner
+approves crates-io. This document does not authorize tagging, publication,
+re-tagging or replacement of existing registry bytes.
 
 Identity remains **TelemetryWorks/irig106-core**, **trusted-publishing.yml**,
 environment **crates-io**, workflow name **Trusted publishing**. The virtual

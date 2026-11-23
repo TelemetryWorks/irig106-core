@@ -1,9 +1,9 @@
 # Consumer migration contract for core 0.1
 
-This is a future adoption contract, not evidence of changes in downstream repos.
-Core remains an unreleased 0.0.1 development manifest. Time is paused until core
-is published under separate authorization; its resume replaces the duplicate
-reader. No downstream implementation or publication is performed by this slice.
+This contract guides downstream adoption of core 0.1.0; it is not evidence of
+changes in downstream repos. Time's resume replaces its duplicate reader after
+core publication under separate authorization. Downstream implementation and
+publication remain separate work.
 
 ## Time's promoted transport
 
