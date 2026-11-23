@@ -80,6 +80,10 @@ pub struct Packet {
 }
 /// Coordinator EOF policy: cut final packets/headers are warnings; unsynced
 /// padding after an established stream is information. The caller grades them.
+/// ```compile_fail,E0004
+/// use irig106_core::TailKind;
+/// fn closed(value: TailKind) { match value { TailKind::PartialHeader => (), TailKind::TruncatedPacket => (), TailKind::Unsynchronized => () } }
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TailKind {
     /// Fewer than 24 primary bytes at EOF.
@@ -90,6 +94,10 @@ pub enum TailKind {
     Unsynchronized,
 }
 /// One packet or a terminal tail; no diagnostic history is retained.
+/// ```compile_fail,E0004
+/// use irig106_core::Event;
+/// fn closed(value: Event) { match value { Event::Packet(_) => (), Event::Tail { .. } => () } }
+/// ```
 #[derive(Debug, PartialEq, Eq)]
 pub enum Event {
     /// A completely consumed frame, with optional bounded DATA capture.

@@ -37,15 +37,31 @@ pub struct Tail {
 #[non_exhaustive]
 pub enum ErrorKind {
     /// Original operational read failure.
+    /// ```compile_fail
+    /// use irig106_core::ErrorKind;
+    /// fn closed(reason: ErrorKind) { if let ErrorKind::Io(_) = reason {} }
+    /// ```
     Io(io::Error),
     /// Checksum-qualified impossible primary framing.
+    /// ```compile_fail
+    /// use irig106_core::ErrorKind;
+    /// fn closed(reason: ErrorKind) { if let ErrorKind::Header(_) = reason {} }
+    /// ```
     Header(HeaderError),
     /// EOF without a single completely consumed frame.
+    /// ```compile_fail
+    /// use irig106_core::ErrorKind;
+    /// fn closed(reason: ErrorKind) { if let ErrorKind::NoCompletePacket { tail: _ } = reason {} }
+    /// ```
     NoCompletePacket {
         /// Available tail evidence, absent for empty input.
         tail: Option<Tail>,
     },
     /// Caller's inclusive candidate-displacement budget was exhausted.
+    /// ```compile_fail
+    /// use irig106_core::ErrorKind;
+    /// fn closed(reason: ErrorKind) { if let ErrorKind::RecoveryLimit { limit: _ } = reason {} }
+    /// ```
     RecoveryLimit {
         /// Explicit caller cap; never a default limit.
         limit: u64,
@@ -53,6 +69,10 @@ pub enum ErrorKind {
     /// Zero buffered-input capacity.
     InvalidBuffer,
     /// Requested DATA prefix exceeds the caller's capture bound.
+    /// ```compile_fail
+    /// use irig106_core::ErrorKind;
+    /// fn closed(reason: ErrorKind) { if let ErrorKind::CaptureLimit { requested: _, limit: _ } = reason {} }
+    /// ```
     CaptureLimit {
         /// Requested size after clamping to Data Length.
         requested: usize,
@@ -60,6 +80,10 @@ pub enum ErrorKind {
         limit: usize,
     },
     /// Bounded DATA capture allocation failed.
+    /// ```compile_fail
+    /// use irig106_core::ErrorKind;
+    /// fn closed(reason: ErrorKind) { if let ErrorKind::Allocation(_) = reason {} }
+    /// ```
     Allocation(TryReserveError),
     /// Advancing the consumed byte offset would exceed u64.
     OffsetOverflow,
