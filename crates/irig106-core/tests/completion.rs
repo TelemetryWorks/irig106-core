@@ -44,7 +44,7 @@ fn empty_and_every_first_packet_cut_are_no_complete_packet() {
             for cut in 0..b.len() {
                 let mut r = reader(&b[..cut], None);
                 let error = r.next_packet(|_| capture).unwrap_err();
-                let ErrorKind::NoCompletePacket { tail } = error.reason else {
+                let ErrorKind::NoCompletePacket { tail, .. } = error.reason else {
                     panic!("{error:?}")
                 };
                 if cut == 0 {
@@ -120,7 +120,10 @@ fn recovery_cap_is_inclusive_and_optional() {
     assert_eq!((p.offset, p.recovered_bytes), (7, 7));
     let mut r = reader(&b, Some(6));
     let e = r.next_packet(|_| 0).unwrap_err();
-    assert!(matches!(e.reason, ErrorKind::RecoveryLimit { limit: 6 }));
+    assert!(matches!(
+        e.reason,
+        ErrorKind::RecoveryLimit { limit: 6, .. }
+    ));
     assert_eq!(
         e.recovery.map(|r| (r.start_offset, r.scanned_bytes)),
         recovered(0, 6)
@@ -134,7 +137,10 @@ fn recovery_cap_is_inclusive_and_optional() {
         Some(Event::Packet(_))
     ));
     let e = reader(&b, Some(0)).next_packet(|_| 0).unwrap_err();
-    assert!(matches!(e.reason, ErrorKind::RecoveryLimit { limit: 0 }));
+    assert!(matches!(
+        e.reason,
+        ErrorKind::RecoveryLimit { limit: 0, .. }
+    ));
     assert_eq!(e.recovery.unwrap().scanned_bytes, 0);
 }
 
@@ -188,7 +194,10 @@ fn structural_and_io_failures_keep_typed_causes_and_recovery() {
     let e = r.next_packet(|_| 0).unwrap_err();
     assert!(matches!(
         e.reason,
-        ErrorKind::Header(HeaderError::UnalignedPacket { length: 30 })
+        ErrorKind::Header {
+            source: HeaderError::UnalignedPacket { length: 30 },
+            ..
+        }
     ));
     assert_eq!(
         e.recovery.map(|r| (r.start_offset, r.scanned_bytes)),
@@ -215,7 +224,7 @@ fn structural_and_io_failures_keep_typed_causes_and_recovery() {
     r.next_packet(|_| 0).unwrap();
     let e = r.next_packet(|_| 0).unwrap_err();
     assert!(
-        matches!(&e.reason, ErrorKind::Io(source) if source.kind() == io::ErrorKind::PermissionDenied)
+        matches!(&e.reason, ErrorKind::Io { source, .. } if source.kind() == io::ErrorKind::PermissionDenied)
     );
     assert_eq!(
         e.recovery.map(|r| (r.start_offset, r.scanned_bytes)),
@@ -265,7 +274,8 @@ fn caller_limit_errors_are_typed_and_do_not_become_no_complete_packet() {
         e.reason,
         ErrorKind::CaptureLimit {
             requested: 4,
-            limit: 3
+            limit: 3,
+            ..
         }
     ));
     assert_eq!(

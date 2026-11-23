@@ -16,3 +16,9 @@ or Default plus builder setters; evidence structs and Event::Tail are extensible
 
 See the [repository requirements and plan](https://github.com/TelemetryWorks/irig106-core/blob/main/docs/requirements.md)
 and [proposed API](https://github.com/TelemetryWorks/irig106-core/blob/main/docs/api.md).
+
+Inspection::new(InspectionLimits::new(channels, rows)) collects bounded header
+facts without payload/history retention. Feed every Event, finish only at clean
+EOF, and mark_incomplete on reader error/early stop. Missing records remain
+Unknown on incomplete scans or after any recovery; Present means observed headers,
+not valid content. Clean EOF after recovery does not establish absence.

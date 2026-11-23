@@ -3,7 +3,6 @@ use irig106_core::{
     DataChecksumState, ErrorKind, Event, Header, HeaderError, PacketRanges, PacketReader,
     ReaderLimits, SecondaryIntegrity,
 };
-use std::io;
 
 fn frame(flags: u8, data: &[u8], len: usize) -> Vec<u8> {
     let start = if flags & 0x80 == 0 { 24 } else { 36 };
@@ -90,7 +89,7 @@ fn every_trailer_width_keeps_data_filler_checksum_disjoint() {
                 .next_packet(|_| 5)
                 .unwrap_err();
             assert!(
-                matches!(e.reason, ErrorKind::NoCompletePacket {tail:Some(t)} if t.kind == irig106_core::TailKind::TruncatedPacket && t.bytes == 47)
+                matches!(e.reason, ErrorKind::NoCompletePacket {tail:Some(t), .. } if t.kind == irig106_core::TailKind::TruncatedPacket && t.bytes == 47)
             );
         }
     }
@@ -116,7 +115,10 @@ fn insufficient_trailer_space_stops_before_capture() {
                 .unwrap_err();
             assert!(matches!(
                 e.reason,
-                ErrorKind::Header(HeaderError::DataTooLong { .. })
+                ErrorKind::Header {
+                    source: HeaderError::DataTooLong { .. },
+                    ..
+                }
             ));
             assert_eq!(e.position, 24);
             assert!(r.next_packet(|_| 0).unwrap().is_none());
@@ -133,7 +135,7 @@ fn insufficient_trailer_space_stops_before_capture() {
 }
 
 #[test]
-fn limit_builders_and_error_display_are_consumer_apis() {
+fn limit_builders_and_outer_error_display_are_consumer_apis() {
     let defaults = ReaderLimits::default();
     assert_eq!(
         (
@@ -160,50 +162,6 @@ fn limit_builders_and_error_display_are_consumer_apis() {
         ReaderLimits::new().recovery_bytes,
         ReaderLimits::default().recovery_bytes
     );
-    for (reason, text) in [
-        (
-            ErrorKind::Io(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "reader blocked",
-            )),
-            "input read failed: reader blocked",
-        ),
-        (
-            ErrorKind::Header(HeaderError::UnalignedPacket { length: 30 }),
-            "invalid packet framing: packet length 30 is not divisible by four",
-        ),
-        (
-            ErrorKind::NoCompletePacket { tail: None },
-            "no complete Chapter 10 packet found",
-        ),
-        (
-            ErrorKind::RecoveryLimit { limit: 7 },
-            "recovery search exhausted caller limit of 7 bytes",
-        ),
-        (
-            ErrorKind::InvalidBuffer,
-            "reader buffer must contain at least one byte",
-        ),
-        (
-            ErrorKind::CaptureLimit {
-                requested: 5,
-                limit: 4,
-            },
-            "requested DATA prefix 5 bytes exceeds capture limit 4 bytes",
-        ),
-        (
-            ErrorKind::OffsetOverflow,
-            "input byte offset exceeds u64 range",
-        ),
-    ] {
-        assert_eq!(reason.to_string(), text);
-    }
-    let allocation = Vec::<u8>::new().try_reserve(usize::MAX).unwrap_err(); // No allocation attempted.
-    assert!(
-        ErrorKind::Allocation(allocation)
-            .to_string()
-            .starts_with("could not allocate DATA prefix: ")
-    );
     let e = PacketReader::new(&[][..], ReaderLimits::default())
         .unwrap()
         .next_packet(|_| 0)
@@ -228,4 +186,57 @@ fn range_arithmetic_handles_the_largest_aligned_length_without_packet_allocation
     assert_eq!(ranges.data, 24..0xFFFF_FFFC);
     assert_eq!(ranges.filler, 0xFFFF_FFFC..0xFFFF_FFFC);
     assert_eq!(ranges.checksum, 0xFFFF_FFFC..0xFFFF_FFFC);
+}
+
+#[test]
+fn width_four_range_at_largest_aligned_packet_length() {
+    let mut b = frame(3, &[], 24); // Header only; no giant allocation.
+    b[4..8].copy_from_slice(&0xFFFF_FFFCu32.to_le_bytes());
+    b[8..12].copy_from_slice(&0xFFFF_FFE0u32.to_le_bytes());
+    let seal = |b: &mut [u8]| {
+        let sum: u32 = b[..22]
+            .chunks_exact(2)
+            .map(|w| u16::from_le_bytes([w[0], w[1]]) as u32)
+            .sum();
+        b[22..24].copy_from_slice(&(sum as u16).to_le_bytes());
+    };
+    seal(&mut b);
+    let ranges = PacketRanges::from_header(&Header::parse(&b).unwrap()).unwrap();
+    assert_eq!(ranges.data, 24..0xFFFF_FFF8);
+    assert_eq!(ranges.filler, 0xFFFF_FFF8..0xFFFF_FFF8);
+    assert_eq!(ranges.checksum, 0xFFFF_FFF8..0xFFFF_FFFC);
+    assert_eq!(ranges.data_checksum, DataChecksumState::NotChecked);
+    b[8] = 0xE1; // One DATA byte beyond available space, checksum stays valid.
+    seal(&mut b);
+    assert_eq!(
+        PacketRanges::from_header(&Header::parse(&b).unwrap()).unwrap_err(),
+        HeaderError::DataTooLong {
+            length: 0xFFFF_FFE1,
+            available: 0xFFFF_FFE0
+        }
+    );
+}
+
+#[test]
+fn display_keeps_terminal_tail_and_recovery_evidence() {
+    for (b, expected) in [
+        (
+            vec![0x25, 0xEB, 0],
+            "packet reader at 3: no complete Chapter 10 packet found: partial header at 0 (3 bytes)",
+        ),
+        (
+            [vec![0xFF; 7], frame(0, &[1; 4], 28)[..26].to_vec()].concat(),
+            "packet reader at 33: no complete Chapter 10 packet found: truncated packet at 7 (26 bytes); recovery started at 0, scanned 7 bytes",
+        ),
+        (
+            vec![0xFF; 27],
+            "packet reader at 27: no complete Chapter 10 packet found: unsynchronized data at 0 (27 bytes); recovery started at 0, scanned 3 bytes",
+        ),
+    ] {
+        let e = PacketReader::new(&b[..], ReaderLimits::default())
+            .unwrap()
+            .next_packet(|_| 0)
+            .unwrap_err();
+        assert_eq!(e.to_string(), expected);
+    }
 }

@@ -14,7 +14,12 @@ and PacketRanges non-exhaustive; Event::Tail is a non-exhaustive variant.
 Construct limits with ReaderLimits::new()/Default and with_buffer_bytes,
 with_capture_bytes, with_recovery_bytes builders. Other evidence is read through
 fields or patterns containing `..`; consumers cannot construct struct literals.
-ErrorKind and Error now format human-readable messages through Display.
+Event and TailKind are also non-exhaustive. Every field-carrying ErrorKind
+variant is non-exhaustive: Io/Header/Allocation now use named `source` fields,
+so consumers can match `ErrorKind::Header { source, .. }`. Non-exhaustive tuple
+variants would be private to external matching in Rust. ErrorKind Display
+includes NoCompletePacket tail kind/bytes/offset; Error Display appends recovery
+start/scanned bytes when present. Typed sources and classifications are unchanged.
 All errors/tails terminate iteration; repeated calls yield None. This is framing
 completion, not full packet/recording conformance. Behavior follows
 [requirements](requirements.md).
@@ -117,3 +122,30 @@ counts, emits sequence/presence observations and retains no packet history.
 Summary formatting, diagnostic samples, names, filtering, output staging, exit
 thresholds and `irig106 inspect` itself remain downstream. An observed TMATS
 packet is not valid TMATS; absence after an incomplete scan is inconclusive.
+
+## Bounded inspection
+
+Inspection::new(InspectionLimits::new(max_channels, max_rows)) requires explicit
+entry budgets; zero accepts no entries. observe(&Event) counts complete frames
+only, finish() declares clean EOF, and mark_incomplete() records reader failure
+or early stop. Feed all events without filtering. A tail/limit/overflow makes
+incompleteness sticky; finish cannot upgrade it, nor certify empty input.
+
+Global, per-type and per-(channel,type) counts use checked u64 packet/DATA/packet
+byte sums. DATA means declared Data Length, not captured bytes. Packet bytes
+include headers/trailers but exclude recovered junk and terminal tails. Row
+DATA minima/maxima and raw unknown type codes are retained; iterators are sorted.
+State is bounded channel/row maps plus 256 fixed type counters. A rejected
+observation changes no counters/rows/presence; no eviction or partial updates.
+Further observations after closure fail. Allocation failure is not forced or
+made fallible for std BTree storage; entry budgets are not process-RSS claims.
+
+PresenceFacts uses Present/Absent/Unknown. Setup is channel0/type01; index and
+events are raw types03/02. Matching headers do not validate payload contents or
+imply enabled features. Unseen records become Absent only after a complete,
+unfiltered scan with no recovered bytes; otherwise Unknown. Recovery is sticky:
+any accepted packet with recovered_bytes > 0 prevents absence claims even after
+later unrecovered packets and clean EOF (ScanStatus may still be Complete).
+Previously observed Present facts survive incomplete or recovered scans. The
+caller must mark read errors or omitted input explicitly.
+Sequence continuity and user-facing reports remain later work.
