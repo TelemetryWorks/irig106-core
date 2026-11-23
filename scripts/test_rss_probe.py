@@ -13,7 +13,7 @@ class RssContract(unittest.TestCase):
             make_fixture(path, 256, 32, 3)
             data = path.read_bytes()  # Small unit fixture only.
         self.assertEqual(len(data), 4 * 256 * 28 + 9 + 32)
-        self.assertEqual(data[:24].hex(), "25eb00001c0000000400000000000009000000000000000045f4")
+        self.assertEqual(data[:24].hex(), "25eb00001c000000040000000000000900000000000045f4")
         self.assertEqual(data[255 * 28 + 13], 255)
         self.assertEqual(data[255 * 28 + 22:255 * 28 + 24], bytes.fromhex("45f3"))
         self.assertEqual(data[256 * 28:256 * 28 + 3], b"\xff" * 3)
