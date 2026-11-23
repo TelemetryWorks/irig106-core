@@ -187,6 +187,25 @@ fn events_only_complete_scan_does_not_imply_index() {
 }
 
 #[test]
+fn inspection_error_display_is_human_readable() {
+    for (channels, rows, text) in [
+        (0, 1, "inspection channel limit of 0 exceeded"),
+        (1, 0, "inspection row limit of 0 exceeded"),
+    ] {
+        let mut a = Inspection::new(InspectionLimits::new(channels, rows));
+        assert_eq!(a.observe(&event(1, 9, 4)).unwrap_err().to_string(), text);
+        assert_eq!(
+            a.observe(&event(1, 9, 4)).unwrap_err().to_string(),
+            "inspection is no longer accepting events"
+        );
+    }
+    assert_eq!(
+        InspectionError::CountOverflow.to_string(),
+        "inspection counters exceed u64 range"
+    );
+}
+
+#[test]
 fn terminal_tail_cannot_be_overridden_by_finish() {
     let b = [frame(0, 1, 4), vec![0x25, 0xEB, 0]].concat();
     let mut r = PacketReader::new(&b[..], ReaderLimits::new()).unwrap();
