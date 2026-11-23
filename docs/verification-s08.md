@@ -49,6 +49,7 @@ and early termination fail. Peak RSS includes the Rust runtime/allocator and
 core driver, but excludes the generating parent and compilation. This checks a
 specific streaming/inventory regression, not arbitrary limits, process OOM,
 all allocator/platform behavior, throughput or full-standard conformance.
+RSS measures resident (touched) pages only; a reserved but unwritten buffer is invisible to it.
 
 ## Initial history control, removed (original smaller fixture)
 

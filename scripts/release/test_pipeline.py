@@ -28,6 +28,9 @@ class ReleaseControls(unittest.TestCase):
         self.env = patch.dict(os.environ, {"GITHUB_OUTPUT": "", "GITHUB_STEP_SUMMARY": ""})
         self.env.start()
         self.addCleanup(self.env.stop)
+        self.identity = patch.object(pipeline, "check_source_identity")
+        self.identity.start()
+        self.addCleanup(self.identity.stop)
         self.value = "0.2.0"
         self.crate = f"irig106-core-{self.value}.crate"
         self.artifacts = self.root / "artifacts"
@@ -42,6 +45,23 @@ class ReleaseControls(unittest.TestCase):
 
     def test_valid_manifest(self):
         self.assertEqual(set(pipeline.validate_bundle(self.artifacts, self.value)), {self.crate, "sbom.cdx.json"})
+
+    def test_gate_event_and_checkout_identity_must_match(self):
+        self.identity.stop()
+        with patch.dict(os.environ, {"RELEASE_COMMIT": "a" * 40, "GITHUB_SHA": "b" * 40}):
+            with patch.object(pipeline, "run", side_effect=["a" * 40, "a" * 40]):
+                pipeline.check_source_identity()
+            for results in [["b" * 40], ["a" * 40, "b" * 40]]:
+                with patch.object(pipeline, "run", side_effect=results), self.assertRaises(ValueError):
+                    pipeline.check_source_identity()
+
+    def test_source_mismatch_stops_signature_cli(self):
+        (self.artifacts / f"irig106-core-{self.value}.crates.intoto.jsonl").write_text('{}\n')
+        with patch.object(pipeline, "check_source_identity", side_effect=ValueError("source mismatch")), \
+             patch.object(pipeline.subprocess, "run") as cli:
+            with self.assertRaisesRegex(ValueError, "source mismatch"):
+                pipeline.verify_attestations(self.artifacts, self.value)
+            cli.assert_not_called()
 
     def test_checksum_mutation_rejected(self):
         (self.artifacts / self.crate).write_bytes(b"changed")

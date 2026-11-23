@@ -44,6 +44,8 @@ controls check packet-sized draining and recovery retention. This is scoped regr
 or throughput guarantee. no_std/alloc and packet-data checksum validation are
 tracked follow-ups, not 0.1 features.
 
-No release is authorized. Slice 9 must adopt the organization
-[Trusted Publishing standard](https://github.com/TelemetryWorks/.github/blob/main/docs/TRUSTED-PUBLISHING.md)
-before the first real release; publishing remains OIDC-only with owner approval.
+The base [Trusted Publishing pipeline](docs/RELEASING.md) supplies six release
+jobs and a read-only PR/manual Publish path dry run. Its known-good comparison
+uses published core 0.0.1; development artifacts are unsigned. Adoption requires
+review and passing CI and authorizes no tag or release. Publishing remains
+OIDC-only in crates-io, with owner approval and a separate release decision.
