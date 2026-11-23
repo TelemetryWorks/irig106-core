@@ -20,6 +20,12 @@ Base main: c8db7fab62a7465444c21e32132ee32ef3b5173e (approved PR10).
   Core also adds event/gate/checkout identity checks and workflow-contract tests;
   those extensions were added with implementation, not failing first.
 
+Seven focused local mutations are caught by mock/contract tests: omit pre-upload
+or pre-attach verification, accept the wrong registry checksum, omit the trusted
+fixture pin, ignore event identity, select the lowest Latest version, and remove
+an independent tag-push guard. Source restored; all 55 controls pass. No mutation
+was pushed or used to invoke a privileged release route.
+
 ## Contract and evidence boundary: L3-REL-007
 
 The six base ids/names/edges/permissions and the seventh read-only dry-run job
@@ -62,5 +68,8 @@ zizmor1.33.1 are exact upstream binaries with pinned SHA-256, installed outside
 the crate; CI audits all workflows and additionally audits trusted-publishing.yml
 with auditor persona. New publishing workflow has no auditor findings; baseline
 CI's toolchain-action informational suggestions are not suppressed by repo config.
+Initial online CI additionally found stale master comments on four existing
+toolchain-action pins. Upstream v1 resolves to their existing 683b588 SHA; only
+those comments were corrected, preserving the reviewed action code.
 The RSS doc now states that untouched reserved memory is invisible to resident
 page measurements. No production library, dependency or release version change.
