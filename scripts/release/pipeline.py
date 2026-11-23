@@ -346,7 +346,13 @@ def release_assets(directory, value):
         subprocess.run(command, check=True)
     # Use the numeric release/asset APIs: tag lookup can hide a resumed draft.
     if not matches:
-        matches = [item for item in release_list() if item["tag_name"] == tag]
+        # Creation can precede list visibility. Never create again while polling.
+        for attempt in range(5):
+            matches = [item for item in release_list() if item["tag_name"] == tag]
+            if matches:
+                break  # Ambiguous results still fail the uniqueness check below.
+            if attempt < 4:
+                time.sleep(2 ** attempt)
     if len(matches) != 1:
         raise ValueError("Created draft could not be uniquely identified")
     release = matches[0]

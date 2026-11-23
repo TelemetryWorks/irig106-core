@@ -336,6 +336,13 @@ class ReleaseControls(unittest.TestCase):
         self.assertEqual(len(self.release_mutations.call_args_list), 1)
         self.assertEqual(self.release_mutations.call_args.args[0][:3], ["gh", "release", "create"])
 
+    def test_post_create_ambiguity_fails_without_retry_or_attachment(self):
+        with patch.object(pipeline, "release_list", side_effect=[[], [{"tag_name": "v0.2.0"}] * 2]), \
+             self.assertRaisesRegex(ValueError, "Created draft could not be uniquely identified"):
+            self.release_case(new=True, missing=True)
+        self.release_sleeps.assert_not_called()
+        self.assertEqual(len(self.release_mutations.call_args_list), 1)  # Creation only.
+
     def test_single_crate_manifest_scope(self):
         Path("Cargo.toml").write_text('[workspace]\nmembers=["crates/irig106-core"]\n[workspace.package]\nversion="0.2.0"\n')
         manifest = Path("crates/irig106-core/Cargo.toml")
@@ -380,6 +387,7 @@ class ReleaseControls(unittest.TestCase):
 
     def test_resumed_draft_uses_numeric_api(self):
         calls = self.release_case(draft=True)
+        self.release_sleeps.assert_not_called()
         self.assertEqual(len(calls), 1)
         self.assertIn("PATCH", calls[0].args[0])
         self.assertIn("releases/10", calls[0].args[0][-3])
