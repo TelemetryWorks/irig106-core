@@ -8,7 +8,9 @@ including checked offset-overflow unit coverage. See [slice 2](verification-s02.
 Slice 5 adds secondary checksum/reserved evidence and trailer ranges; see
 [clause evidence](verification-s05.md). Slice 6 adds bounded inventory/presence facts ([evidence](verification-s06.md));
 slice 7 adds per-channel sequence observations and the consumer migration contract
-([evidence](verification-s07.md)). Allocation-failure
+([evidence](verification-s07.md)). Slice 8 adds CI-only isolated RSS regression
+evidence, exact package inventory and archive verification
+([evidence](verification-s08.md)). Allocation-failure
 handling is typed but no process-OOM test is claimed. No whole-recording or
 whole-standard conformance is asserted.
 
@@ -73,7 +75,7 @@ Coverage is clause-scoped in the slice evidence; planned probes are not passes.
 | L3-SEQ-006 → L2-SEQ-006 | 255→0, duplicate, discontinuity, interleaved channels and multiple types on one channel. |
 | L3-PRES-006 → L2-PRES-006 | Setup/index/event observations; absent complete vs incomplete scan; no semantic validity claim. |
 | L3-PKG-007 → L2-PKG-007 | Metadata, registry-only dependency/default-feature boundary and package file checks; CI builds archived source. Header integration tests use the shared Rtc directly. |
-| L3-REL-007 → L2-REL-007 | Future: exact-head CI/review ledger and unsigned publishing-path dry run; release remains separately authorized. |
+| L3-REL-007 → L2-REL-007 | Exact-head CI/review ledgers; unsigned publishing-path dry run remains planned for slice 9. Release remains separately authorized. |
 
 ## Nine review slices
 

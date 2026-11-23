@@ -1,11 +1,13 @@
 # irig106-core
 
-Unreleased development toward 0.1 provides `Header::parse`, `primary_checksum`,
-`HeaderError` and the shared `Rtc` type. Parsing checks the first 24 bytes only:
-sync, primary checksum and basic framing lengths. It does not establish a
-complete packet. The manifest remains 0.0.1; no new version is published.
+Unreleased development toward 0.1 supplies structural packet traversal, typed
+completion/errors, bounded inventory and per-channel sequence observations.
+The manifest remains 0.0.1; no new version is published. The sole dependency is
+irig106-types 0.1 (default features off), including re-exported Rtc.
 
-Slice 3 promotes irig106-time-cli's bounded streaming reader. Core owns packet
+Header::parse checks primary sync/checksum/basic lengths on 24 bytes; it does
+not establish a complete packet. PacketReader promotes irig106-time-cli's
+reviewed streaming reader. Core owns packet
 finding and basic framing; payload meaning stays with TMATS, time and decode.
 Default recovery continues to EOF with bounded memory. The reader uses
 typed errors: NoCompletePacket for EOF before any complete frame, original
@@ -15,7 +17,7 @@ exposed. Packet-data checksum contents remain NotChecked. Use ReaderLimits::new(
 or Default plus builder setters; evidence structs and Event::Tail are extensible.
 
 See the [repository requirements and plan](https://github.com/TelemetryWorks/irig106-core/blob/main/docs/requirements.md)
-and [proposed API](https://github.com/TelemetryWorks/irig106-core/blob/main/docs/api.md).
+and [development API](https://github.com/TelemetryWorks/irig106-core/blob/main/docs/api.md).
 
 Inspection::new(InspectionLimits::new(channels, rows)) collects bounded header
 facts without payload/history retention. Feed every Event, finish only at clean
@@ -29,3 +31,10 @@ estimates. See the [migration contract](https://github.com/TelemetryWorks/irig10
 and `cargo run -p irig106-core --example inspect --locked < recording.ch10`.
 Expected successors after skipped input are Unverified; skipped_since_previous
 includes every stream recovery since that channel's prior packet.
+
+CI verifies the packaged archive and file list, executes the inspect example,
+and measures an isolated release process against a 32 MiB RSS ceiling on a
+128 MiB generated fixture. Scope and negative-control evidence are in
+[slice 8](https://github.com/TelemetryWorks/irig106-core/blob/main/docs/verification-s08.md).
+No payload meaning, recording-wide conformance, no_std/alloc or packet-data
+checksum validation is supplied. Publishing preparation remains separately gated.
