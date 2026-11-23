@@ -1,0 +1,14 @@
+[package]
+name = "core-02-readonly-baseline"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+[features]
+count-alloc = []
+[dependencies]
+irig106-core = "=0.1.0"
+[profile.release]
+codegen-units = 1
+# Isolated consumer of the published crate, not a workspace member or dependency.
+[workspace]
