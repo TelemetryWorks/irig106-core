@@ -274,7 +274,7 @@ class ReleaseControls(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Release gate rejected"):
             self.tag_run(api_commit="c" * 40)
 
-    def release_case(self, *, moved=False, wrong_body=False, mismatch=False, missing=False, draft=False, new=False, invalid_assets=None, moved_after_assets=False, other_releases=(), post_create_lag=0, created_id=10, id_errors=None, id_changes=None):
+    def release_case(self, *, moved=False, wrong_body=False, mismatch=False, missing=False, draft=False, new=False, invalid_assets=None, moved_after_assets=False, other_releases=(), post_create_lag=0, created_id=10, id_errors=None, id_changes=None, create_error=None):
         bundle = f"irig106-core-{self.value}.crates.intoto.jsonl"
         (self.artifacts / bundle).write_text('{}\n')
         path = self.make_record()
@@ -295,6 +295,8 @@ class ReleaseControls(unittest.TestCase):
             if args[0] == "gh":
                 if "-X" in args and args[args.index("-X") + 1] == "POST":
                     self.release_creations.append((args, kwargs))
+                    if create_error is not None:
+                        raise create_error
                     return json.dumps({"id": created_id})
                 if "/releases/" in args[-1] and args[-1].rsplit("/", 1)[-1].isdigit():
                     self.release_id_reads.append(args[-1])
@@ -395,6 +397,25 @@ class ReleaseControls(unittest.TestCase):
         self.assert_id_lookup_options()
         self.assertEqual(len(calls), 5)
         self.assertIn("PATCH", calls[-1].args[0])
+
+    def test_id_lookup_succeeds_on_fifth_attempt(self):
+        calls = self.release_case(new=True, missing=True,
+                                  id_errors={n: self.id_not_found() for n in range(1, 5)})
+        self.assertEqual(len(self.release_creations), 1)
+        self.assertEqual(len(self.release_id_reads), 6)  # Five before assets, one before PATCH.
+        self.assertEqual([c.args for c in self.release_sleeps.call_args_list], [(1,), (2,), (4,), (8,)])
+        self.assert_id_lookup_options()
+        self.assertIn("PATCH", calls[-1].args[0])
+
+    def test_uncertain_create_timeout_is_not_retried(self):
+        error = subprocess.TimeoutExpired("gh api POST", 30)
+        with self.assertRaises(subprocess.TimeoutExpired) as raised:
+            self.release_case(new=True, missing=True, create_error=error)
+        self.assertIs(raised.exception, error)
+        self.assertEqual(len(self.release_creations), 1)
+        self.assertEqual(self.release_id_reads, [])
+        self.release_sleeps.assert_not_called()
+        self.release_mutations.assert_not_called()
 
     def test_id_lookup_exhaustion_stops_before_assets_or_finalize(self):
         for start in [1, 2]:

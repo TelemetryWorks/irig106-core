@@ -322,7 +322,18 @@ def registry_wait(directory, value):
 def release_by_id(release_id, tag, title, body, *, require_draft=False):
     if type(release_id) is not int or release_id <= 0:
         raise ValueError("Invalid release ID")
-    release = gh_api(f"repos/{REPO}/releases/{release_id}")
+    # Match types #22: retry only ID visibility lag, never uncertain creation.
+    for attempt in range(5):
+        try:
+            release = json.loads(run("gh", "api", f"repos/{REPO}/releases/{release_id}",
+                                     stderr=subprocess.PIPE, timeout=30))
+            break
+        except subprocess.CalledProcessError as error:
+            if not re.search(r"\bHTTP 404\b", str(error.stderr or "")):
+                raise
+            if attempt == 4:
+                raise ValueError(f"Created draft {release_id} unavailable after 5 ID lookups") from error
+            time.sleep(2 ** attempt)
     if (release["id"] != release_id or release["tag_name"] != tag or release["name"] != title
             or (release.get("body") or "").replace("\r\n", "\n").strip() != body.strip()
             or (require_draft and release.get("draft") is not True)):
