@@ -34,7 +34,8 @@ includes every stream recovery since that channel's prior packet.
 
 CI verifies the packaged archive and file list, executes the inspect example,
 and measures an isolated release process against a 32 MiB RSS ceiling on a
-128 MiB generated fixture. Scope and negative-control evidence are in
+240 MiB generated fixture, including a 64 MiB packet and a 48 MiB recovery gap.
+Scope and separate drain/recovery negative-control evidence are in
 [slice 8](https://github.com/TelemetryWorks/irig106-core/blob/main/docs/verification-s08.md).
 No payload meaning, recording-wide conformance, no_std/alloc or packet-data
 checksum validation is supplied. Publishing preparation remains separately gated.

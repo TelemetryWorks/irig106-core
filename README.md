@@ -38,8 +38,9 @@ verified packaged-source builds, executed public examples and
 `cargo deny check` (deny.toml: advisories, licences, bans and registry-only sources).
 Use light focused local checks with `CARGO_BUILD_JOBS=2`. The CI-only
 [isolated RSS gate](docs/verification-s08.md) measures a release reader/inventory
-process on a 128 MiB fixture with a 32 MiB ceiling. An unbounded-history control
-tripped that ceiling; this is scoped regression evidence, not a universal memory
+process on a 240 MiB fixture with a 32 MiB ceiling, including a complete 64 MiB
+packet (4-byte capture) and a 48 MiB mid-file recovery gap. Separate one-off
+controls check packet-sized draining and recovery retention. This is scoped regression evidence, not a universal memory
 or throughput guarantee. no_std/alloc and packet-data checksum validation are
 tracked follow-ups, not 0.1 features.
 
