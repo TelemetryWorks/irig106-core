@@ -2,10 +2,18 @@
 
 ## [Unreleased]
 
-- Develop structural Chapter 10 traversal, bounded inspection and recovery-aware
-  sequence observations against the 106-24R1 Chapter 11 layout.
-- Prepare the organization Trusted Publishing pipeline with unsigned PR dry runs.
+## [0.1.0] - 2026-11-23
 
-This development record authorizes no release. The published 0.0.1 placeholder
-is retained; a future owner-authorized release needs a version bump, dated entry
-and matching committed release notes before tagging.
+- Add Chapter 10 primary-header/checksum parsing, structural length checks,
+  secondary-header integrity evidence and DATA/filler/checksum ranges using
+  the 106-24R1 Chapter 11 layout.
+- Provide a streaming, bounded packet reader with caller-limited DATA capture,
+  uncapped default sync recovery, optional recovery caps, typed errors and
+  completion/tail evidence that preserves prior analysis.
+- Add bounded counts, raw data-type and presence facts, and per-channel sequence
+  observations with wrap and recovery-qualified continuity.
+- Reuse irig106-types 0.1 and its Rtc type. Target std, Rust edition 2024 and
+  MSRV 1.85; payload interpretation, packet-data checksum validation and
+  no_std/alloc support remain outside 0.1.
+- Add reviewed Trusted Publishing preparation, verified package checks and
+  CI-only isolated RSS regression probes.
