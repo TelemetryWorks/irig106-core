@@ -65,3 +65,26 @@ for pipeline, 49 controls, sidecar verification and semver policy, adapted to th
 core workspace/placeholder and extended with source-identity/workflow contracts.
 See [slice 9 evidence](verification-s09.md). This PR's unsigned candidate
 comparisons are not a successful signature verification or a real release test.
+
+## 2026-11-23: 0.1.0 draft-discovery incident
+
+[Run 45118531760](https://github.com/TelemetryWorks/irig106-core/actions/runs/45118531760)
+published 0.1.0 to crates.io at tag commit f5c733f, then created GitHub draft
+455053502. The immediate post-create releases-list lookup did not identify one
+matching draft and stopped before asset attachment. This is consistent with
+read-after-write visibility lag; historical API response bodies were not logged.
+The same lookup later found the single draft with the correct tag/title/body.
+
+The owner approved rerunning **failed jobs only** with
+`gh run rerun 45118531760 --failed`. Attempt 2 resumed that draft, attached the
+crate, SBOM, SHA256SUMS and provenance sidecar, published the GitHub release and
+passed Verify publication. The successful crates.io upload was not rerun or
+changed; its bytes and tag were not replaced.
+
+For future releases, post-create discovery now performs at most five lookups,
+with 1/2/4/8-second backoff (15 seconds total scheduled delay). It creates the
+draft once; retries only discovery. Exhaustion or ambiguous matches fail before
+attachment/finalization. Existing-draft resume does not wait. Tests simulate an
+empty first post-create lookup followed by visibility, plus permanent absence;
+all mutation APIs and sleeps are mocked. This fix does not modify the v0.1.0 tag
+or its completed release.
