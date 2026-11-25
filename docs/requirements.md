@@ -1,4 +1,4 @@
-# Core 0.1 requirements and delivery plan
+# Core requirements: implemented 0.1 and approved 0.2
 
 Owner approved 2026-11-22; recovery correction from the coordinator is binding.
 Slice 2 supplies primary-header/checksum/basic-length tests and shared `Rtc`.
@@ -19,23 +19,39 @@ Slice 9 supplies the base release pipeline and unsigned Publish path dry run
 
 Sources: **S** = 106-24R1 Chapter 11 §§11.2.1.1–11.2.1.2, as recorded in
 [time's reviewed evidence](provenance.md); **O** = owner/coordinator policy
-2026-11-22; **T** = time L2/L3-CLI-104 and CLI-107 clause evidence, not wholesale
-adoption of their semantic/report requirements. Standard page inspection and
+2026-11-22 and 2026-11-25 (whole-packet decisions); **T** = time L2/L3-CLI-104
+and CLI-107 clause evidence, not wholesale adoption of their semantic/report requirements. Standard page inspection and
 new checksum oracles must be recorded before claiming new wire-rule verification.
 
-## Proposed 0.2 revision (pending owner approval)
+## Mode scope and owner approval
 
-[Slice-1 design](design-0.2.md) proposes exact replacements for L1-CORE-002,
-L2-IO-002 and L2-CAP-002, with admission/budget/RSS obligations. The rows below
-remain the approved 0.1 contract; the proposal does not claim implementation or
-verification credit, and does not relax the existing bounded-capture RSS gate.
+Owner decisions **2026-11-25** approve the whole-packet wording below and align
+[design-0.2.md](design-0.2.md): built-in H = 128 MiB / B = 256 MiB, independently
+overridable; stable exact-EOF admission labelled `Unconfirmed(ExactEof)`; and a
+non-default explicit legacy setup allowance for type 0x01 on any channel.
+These are approved requirements, **not implemented or verified features**.
+Whole-packet slice 2 starts in a separate PR after this docs update merges.
+
+The existing 0.1 bounded-capture mode and its independent-of-declared-size rule
+are preserved, including the original mode-specific obligations:
+
+| Clause (0.1 bounded capture) | Preserved wording |
+| --- | --- |
+| L1-CORE-002 | Stream with caller-bounded memory independent of recording and declared packet size. |
+| L2-IO-002 | Use synchronous buffered Read, bounded DATA capture and fixed metadata; never mmap, unsafe, whole-file reads or Packet-Length allocations. |
+| L2-CAP-002 | Clamp capture to Data Length, then enforce caller cap; never expose filler/checksum as DATA; caller owns retained packets. |
+
+The corresponding primary rows below carry the approved whole-packet wording;
+other clauses continue to apply to both modes where relevant. Historical 0.1
+verification retains only its original clause/mode credit. Existing capture RSS
+gates and uncapped default recovery are unchanged.
 
 ## L1: responsibilities
 
 | ID | Obligation | Source |
 | --- | --- | --- |
 | L1-CORE-001 | Find packets and expose checked structural/routing fields without interpreting payloads. | S, O |
-| L1-CORE-002 | Stream with caller-bounded memory independent of recording and declared packet size. | O, T |
+| L1-CORE-002 | Stream with memory bounded by caller limits and a shared aggregate storage budget, independent of recording length. Grow packet storage only as bytes are actually received, never by reserving a declared Packet Length. Include all live packet/pool storage, retained capacity and allocation/growth workspace in budget accounting. | O |
 | L1-CORE-003 | Recover sync with progress, explicit optional limits and byte-count evidence. | O, T |
 | L1-CORE-004 | Distinguish complete input, malformed structure and EOF tails; preserve preceding packets. | O, T |
 | L1-CORE-005 | Expose integrity evidence independently of payload/time meaning. | S, O |
@@ -51,8 +67,8 @@ aggregate CLI requirement receives verification credit.
 | --- | --- | --- |
 | L2-HDR-001 | L1-CORE-001 | Require sync and primary word checksum at every packet offset; preserve channel, type/version, sequence, flags and raw RTC. |
 | L2-LEN-001 | L1-CORE-001 | Check 24/36-byte minimum, four-byte alignment, Data Length containment and overflow before trusting offsets or allocating. |
-| L2-IO-002 | L1-CORE-002 | Use synchronous buffered Read, bounded DATA capture and fixed metadata; never mmap, unsafe, whole-file reads or Packet-Length allocations. |
-| L2-CAP-002 | L1-CORE-002 | Clamp capture to Data Length, then enforce caller cap; never expose filler/checksum as DATA; caller owns retained packets. |
+| L2-IO-002 | L1-CORE-002 | Use safe, std-only synchronous buffered Read and fixed-size I/O scratch. For whole-packet delivery, acquire budget credits and fallibly extend storage only for received bytes in bounded quanta. Never preallocate from declared lengths, use mmap/unsafe, or retain a recording. Deliver a complete packet only after its entire declared frame has arrived. Preserve bounded capture as a separate compatible mode. |
+| L2-CAP-002 | L1-CORE-002 | Preserve the 0.1 DATA-prefix API and its explicit capture cap. The new default whole-packet API applies explicit edition soft thresholds, an absolute caller hard ceiling and aggregate budget; an over-soft packet requires corroboration or explicit stream opt-in. Refusal/drain/chunk disposition must be reported, never represented as an ordinary complete packet. |
 | L2-REC-003 | L1-CORE-003 | Default recovery has no search cap and continues to EOF with bounded memory. Optional caller cap yields typed RecoveryLimit; report scanned bytes on every incident. |
 | L2-END-004 | L1-CORE-004 | No complete valid packet yields NoCompletePacket (CLI input3); after one, cut-final headers/packets and EOF padding remain tail evidence/findings. |
 | L2-ERR-004 | L1-CORE-004 | Propagate real I/O failures; reject impossible checksum-qualified lengths; preserve content-vs-structure distinction and prior events. |
@@ -65,6 +81,14 @@ aggregate CLI requirement receives verification credit.
 | L2-PKG-007 | L1-CORE-007 | Use a virtual workspace at crates/irig106-core, edition 2024/MSRV 1.85, std-first, types 0.1 as sole ecosystem dependency. |
 | L2-REL-007 | L1-CORE-007 | Independent exact-head review and passing CI precede owner merge. Adopt org Trusted Publishing in slice 9; never publish locally or bypass approval. |
 
+### Whole-packet admission and resource contracts (0.2)
+
+| ID | Parent | Required behavior |
+| --- | --- | --- |
+| L2-ADM-008 | L1-CORE-002, L1-CORE-004 | Default H = 134,217,728 bytes, caller-overridable. Apply explicit edition/type S. Above S, admit through NextHeader, stable Unconfirmed(ExactEof), or explicit StreamOptIn; retain authorization evidence. Enforce H/B/target limits in all cases. Setup S = 134,217,728 defaults to channel0/type01 only; non-default legacy_setup_any_channel explicitly extends it to type01 on other channels with evidence, never by inference. |
+| L2-BUD-008 | L1-CORE-002, L1-CORE-004 | Default shared B = 268,435,456 bytes, caller-overridable independently of H. Account for live/idle storage, metadata and growth workspace; grow only after real bytes arrive. A packet unable to fit the entire reclaimed B returns typed BudgetTooSmall or explicit reported drain, never waits. Temporary reclaimable pressure waits cancellably with deadlock-free ownership return; trim rare large capacity toward baseline. |
+| L2-WHOLE-008 | L1-CORE-002, L1-CORE-004 | Deliver one complete packet only after the declared frame arrives. Stable exact EOF admits an oversoft P <= H fitting B with Unconfirmed(ExactEof); recheck source identity/size before admission and after body consumption, returning SourceChanged on observed mutation. Declared end beyond EOF retains truncation-only handling. Drain/chunk modes are explicit, with provisional streaming evidence until completion. |
+
 ## L3: verification obligations
 
 Coverage is clause-scoped in the slice evidence; planned probes are not passes.
@@ -73,8 +97,8 @@ Coverage is clause-scoped in the slice evidence; planned probes are not passes.
 | --- | --- |
 | L3-HDR-001 → L2-HDR-001 | Hand-packed standard fields; known primary sum; checksum corruption at expected offset; arbitrary flag bytes. |
 | L3-LEN-001 → L2-LEN-001 | Minimum/alignment/overflow boundaries; recompute checksum after structural mutations so checksum rejection cannot mask the test. |
-| L3-IO-002 → L2-IO-002 | Actual small file, three-byte short reads, Interrupted and real errors; CI-only isolated RSS on generated input in slice 8. |
-| L3-CAP-002 → L2-CAP-002 | Zero/exact/over cap, DATA clamp, nonzero filler, partial capture, zero buffer, allocation failure handling. |
+| L3-IO-002 → L2-IO-002 | Preserved 0.1 capture mode: actual small file, three-byte short reads, Interrupted and real errors; CI-only isolated RSS on generated input in slice 8. |
+| L3-CAP-002 → L2-CAP-002 | Preserved 0.1 capture mode: zero/exact/over cap, DATA clamp, nonzero filler, partial capture, zero buffer, allocation failure handling. |
 | L3-REC-003 → L2-REC-003 | Cross-buffer/false sync; exact scanned counts; valid candidate at cap accepted, one byte beyond rejected; >1 MiB padding succeeds by default. |
 | L3-END-004 → L2-END-004 | Empty/no-sync/lone truncated input; complete packet then every header/body cut and zero/FF padding; preserve preceding results. |
 | L3-ERR-004 → L2-ERR-004 | Invalid structure fatal; short/invalid semantic body still delivered; terminal behavior and I/O errors during recovery retain evidence. |
@@ -87,7 +111,26 @@ Coverage is clause-scoped in the slice evidence; planned probes are not passes.
 | L3-PKG-007 → L2-PKG-007 | Metadata, registry-only dependency/default-feature boundary and package file checks; CI builds archived source. Header integration tests use the shared Rtc directly. |
 | L3-REL-007 → L2-REL-007 | Exact-head CI/review ledgers and unsigned publishing-path dry run in slice 9. Cryptographic/registry mutation paths have mocked controls; real release remains separately authorized. |
 
-## Nine review slices
+### Whole-packet L3 obligations (0.2; not yet executed)
+
+These obligations include the owner-required default, exact-EOF/mutation and
+legacy-allowance tests. They belong to the corresponding implementation slices;
+this docs-only PR adds no runtime API or passing-test claims. Full behavior and
+source references are in [the design](design-0.2.md).
+
+| ID → L2 parent | Oracle and required probes |
+| --- | --- |
+| L3-DEFAULT-008 → L2-ADM-008, L2-BUD-008 | Whole-packet new()/Default H = 134,217,728 and B = 268,435,456; independent builder overrides preserve the other setting; defaults do not allocate H/B or alter 0.1 ReaderLimits. Feasibility still includes workspace/pool. |
+| L3-EOF-008 → L2-ADM-008, L2-WHOLE-008 | Stable exact EOF admitted with precisely Unconfirmed(ExactEof), whole bytes and no next-header/stream-opt-in requirement; one byte short takes truncation-only path; identity replacement or size mutation before admission/after body returns SourceChanged with no packet. Missing stability evidence cannot authorize ExactEof. |
+| L3-LEGACY-008 → L2-ADM-008 | Default off: channel0/type01 selects setup S, nonzero/type01 retains ordinary S. Explicit opt-in selects setup S on nonzero/type01 and records LegacySetupAnyChannel evidence. Other types, arbitrary Data Type Versions and guessed editions never enable it. H/B overrides still apply. |
+| L3-GROW-008 → L2-IO-002 | Authorized huge aligned P on tiny short-read input: allocation requests and touched RSS follow received bytes + fixed quantum; exact tail/preceding results. Mutant preallocating/zeroing P must fail. Include a hard-refusal case separately so it cannot mask the growth test. |
+| L3-ADM-008 → L2-ADM-008 | Real oversoft packet below/exactly/above H; valid/invalid/short next header; false checksum-valid payload header; seek restoration across buffering and recovery; final EOF and nonseek opt-in/refusal. Whole bytes and authorization evidence checked independently. |
+| L3-SETUP-008 → L2-ADM-008, L2-BUD-008 | Complete 128 MiB setup with adequate H/B accepted automatically; same size ordinary type needs NextHeader, Unconfirmed(ExactEof) or StreamOptIn; H=64 MiB refuses. Trimmed capacity returns after ownership is released. |
+| L3-BUD-008 → L2-BUD-008 | Instrument all live credits/capacity and transient workspace. Gate a worker with barriers: reader blocks at budget, no new growth; releasing capacity wakes/completes. A packet that exceeds the entire reclaimed B (including scratch/workspace) errors or reports drain without waiting; exact-fit boundaries include overhead. Cancellation, retained idle slots, multiple readers and blocked merger cannot deadlock. |
+| L3-RSS-008 → L2-IO-002, L2-BUD-008 | GNU time wraps prebuilt core-only probe, generation/compilation outside measurement. Tiny bogus-input test retains 32 MiB ceiling; true oversize acceptance gets an explicitly larger justified ceiling. Budget-pressure run bounds touched peak to configured budget plus measured fixed margin. No raising the old capture-path gate to hide a regression. |
+| L3-PLAT-008 → L2-IO-002, L2-BUD-008 | Allocation counters plus Linux touched RSS and Windows commit/working-set evidence; 32-bit checked limits. Controls once with touched preallocation and unbudgeted-retention mutants, then discard mutants. Reserved-but-unwritten memory can evade RSS, so request/accounting assertions are mandatory. |
+
+## Nine review slices (0.1 history)
 
 Target 300–600 changed lines per PR, including tests and evidence. Freeze after
 reporting each PR/head; independent reviewer reviews that exact head before owner
