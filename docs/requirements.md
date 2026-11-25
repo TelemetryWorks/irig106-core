@@ -46,6 +46,13 @@ other clauses continue to apply to both modes where relevant. Historical 0.1
 verification retains only its original clause/mode credit. Existing capture RSS
 gates and uncapped default recovery are unchanged.
 
+Default B = 256 MiB fits a maximum 128 MiB setup packet only with block-based
+PacketBuf storage, bounded workspace and a normal pool. Coalescing that packet
+or using contiguous-only Vec storage requires a caller override with
+B >= 2 x 128 MiB + overhead, or the consumer must read the complete spans.
+At default B, maximum-setup coalescing returns typed BudgetTooSmall without
+waiting, even after all other buffers are returned. Default H/B are unchanged.
+
 ## L1: responsibilities
 
 | ID | Obligation | Source |
@@ -125,7 +132,7 @@ source references are in [the design](design-0.2.md).
 | L3-LEGACY-008 → L2-ADM-008 | Default off: channel0/type01 selects setup S, nonzero/type01 retains ordinary S. Explicit opt-in selects setup S on nonzero/type01 and records LegacySetupAnyChannel evidence. Other types, arbitrary Data Type Versions and guessed editions never enable it. H/B overrides still apply. |
 | L3-GROW-008 → L2-IO-002 | Authorized huge aligned P on tiny short-read input: allocation requests and touched RSS follow received bytes + fixed quantum; exact tail/preceding results. Mutant preallocating/zeroing P must fail. Include a hard-refusal case separately so it cannot mask the growth test. |
 | L3-ADM-008 → L2-ADM-008 | Real oversoft packet below/exactly/above H; valid/invalid/short next header; false checksum-valid payload header; seek restoration across buffering and recovery; final EOF and nonseek opt-in/refusal. Whole bytes and authorization evidence checked independently. |
-| L3-SETUP-008 → L2-ADM-008, L2-BUD-008 | Complete 128 MiB setup with adequate H/B accepted automatically; same size ordinary type needs NextHeader, Unconfirmed(ExactEof) or StreamOptIn; H=64 MiB refuses. Trimmed capacity returns after ownership is released. |
+| L3-SETUP-008 → L2-ADM-008, L2-BUD-008 | At built-in H = 128 MiB and B = 256 MiB, a complete 128 MiB setup packet (P = H) is accepted with the default block-based representation; coalescing it under default B returns typed BudgetTooSmall without waiting, including with all other buffers returned. Contiguous coalescing/Vec requires B >= 2 x 128 MiB + overhead via caller override, or consume spans. Same size ordinary type needs NextHeader, Unconfirmed(ExactEof) or StreamOptIn; H=64 MiB refuses. Trimmed capacity returns after ownership is released. |
 | L3-BUD-008 → L2-BUD-008 | Instrument all live credits/capacity and transient workspace. Gate a worker with barriers: reader blocks at budget, no new growth; releasing capacity wakes/completes. A packet that exceeds the entire reclaimed B (including scratch/workspace) errors or reports drain without waiting; exact-fit boundaries include overhead. Cancellation, retained idle slots, multiple readers and blocked merger cannot deadlock. |
 | L3-RSS-008 → L2-IO-002, L2-BUD-008 | GNU time wraps prebuilt core-only probe, generation/compilation outside measurement. Tiny bogus-input test retains 32 MiB ceiling; true oversize acceptance gets an explicitly larger justified ceiling. Budget-pressure run bounds touched peak to configured budget plus measured fixed margin. No raising the old capture-path gate to hide a regression. |
 | L3-PLAT-008 → L2-IO-002, L2-BUD-008 | Allocation counters plus Linux touched RSS and Windows commit/working-set evidence; 32-bit checked limits. Controls once with touched preallocation and unbudgeted-retention mutants, then discard mutants. Reserved-but-unwritten memory can evade RSS, so request/accounting assertions are mandatory. |

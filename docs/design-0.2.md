@@ -41,10 +41,14 @@ absolute hard ceiling, B aggregate budget and K fixed I/O quantum. All include
 explicit units; P includes headers/trailer, not just DATA. Built-in defaults are
 **H = 128 MiB (134,217,728 bytes)** and **B = 256 MiB (268,435,456 bytes)**.
 Both are independently caller-overridable. H matches the largest packet allowed
-by the baseline standard (setup); B accommodates one maximum setup plus bounded
-workspace and a normal pool. This does not promise every pool/coalescing layout
-fits B: charge all retained storage/workspace and apply the feasibility check
-below. Neither default causes up-front allocation or derives from host RAM.
+by the baseline standard (setup). **B fits one maximum 128 MiB setup packet
+only with the default block-based PacketBuf representation**, plus bounded
+workspace and a normal pool. Coalescing that packet into contiguous memory, or
+using a contiguous-only Vec representation, requires a caller override with
+**B >= 2 x 134,217,728 bytes + overhead** (more than 256 MiB); otherwise the
+consumer must read the spans. Charge all retained storage/workspace and apply
+the feasibility check below. Neither default causes up-front allocation or
+derives from host RAM.
 
 For baseline 106-24R1, S is 524,288 bytes except Computer-Generated Format 1 setup,
 134,217,728 bytes. Time and Format 3 root index retain the ordinary maximum.
@@ -145,7 +149,7 @@ A naive Vec::try_reserve(delta) is insufficient: growth may be geometric and a
 moving reallocation can transiently retain old and new allocations. Even
 [try_reserve_exact](https://doc.rust-lang.org/std/vec/struct.Vec.html#method.try_reserve_exact)
 permits allocator excess. Small exact contiguous increments can also repeatedly
-copy a large prefix. **Recommended implementation representation:** opaque PacketBuf
+copy a large prefix. **Default implementation representation:** opaque PacketBuf
 with reusable bounded storage blocks, grown fallibly after bytes arrive, exposing
 a complete packet view only at completion. Metadata growth is budgeted too. One
 small packet normally occupies one reusable block; large packets occupy several.
@@ -153,10 +157,15 @@ Internal segmentation is not incremental delivery: workers receive one complete
 packet, with validated DATA ranges over its spans. This avoids a hidden 2P copy.
 
 If a consumer requires one contiguous slice, coalescing is explicit and fallible,
-only after bytes exist, with old+new storage charged simultaneously. It is not
-promised to fit merely because P <= H. A contiguous-only implementation needs a
-separately reviewed conservative growth-workspace rule and benchmark comparison;
-the design does not select an unsafe/unaccounted realloc shortcut.
+only after bytes exist, with old+new storage charged simultaneously. A maximum
+setup packet needs B >= 2 x 128 MiB + overhead, including metadata, scratch and
+other retained storage. At default B = 256 MiB, coalescing that packet returns
+typed BudgetTooSmall **without waiting**, even with all other buffers returned;
+read the complete spans or explicitly raise B. The same conservative minimum
+applies to a contiguous-only Vec representation and its moving-growth workspace.
+In-place reallocation is not a portable guarantee that permits a smaller budget.
+A contiguous-only implementation still needs reviewed growth accounting and a
+benchmark comparison; there is no unsafe/unaccounted realloc shortcut.
 
 Credits cover live storage capacity (not just length), idle slots, metadata and
 transient replacement/coalescing workspace. Charge bounded allocation quanta
@@ -246,7 +255,7 @@ No settings, overcommit policy or process limits are changed by this design.
 | L3-LEGACY-008 | Default off: channel0/type01 selects setup S, nonzero/type01 retains ordinary S. Explicit opt-in selects setup S on nonzero/type01 and records LegacySetupAnyChannel evidence. Other types, arbitrary Data Type Versions and guessed editions never enable it. H/B overrides still apply. |
 | L3-GROW-008 | Authorized huge aligned P on tiny short-read input: allocation requests and touched RSS follow received bytes + fixed quantum; exact tail/preceding results. Mutant preallocating/zeroing P must fail. Include a hard-refusal case separately so it cannot mask the growth test. |
 | L3-ADM-008 | Real oversoft packet below/exactly/above H; valid/invalid/short next header; false checksum-valid payload header; seek restoration across buffering and recovery; final EOF and nonseek opt-in/refusal. Whole bytes and authorization evidence checked independently. |
-| L3-SETUP-008 | Complete 128 MiB setup with adequate H/B accepted automatically; same size ordinary type needs NextHeader, Unconfirmed(ExactEof) or StreamOptIn; H=64 MiB refuses. Trimmed capacity returns after ownership is released. |
+| L3-SETUP-008 | At built-in H = 128 MiB and B = 256 MiB, a complete 128 MiB setup packet (P = H) is accepted with the default block-based representation; coalescing it under default B returns typed BudgetTooSmall without waiting, including with all other buffers returned. Contiguous coalescing/Vec requires B >= 2 x 128 MiB + overhead via caller override, or consume spans. Same size ordinary type needs NextHeader, Unconfirmed(ExactEof) or StreamOptIn; H=64 MiB refuses. Trimmed capacity returns after ownership is released. |
 | L3-BUD-008 | Instrument all live credits/capacity and transient workspace. Gate a worker with barriers: reader blocks at budget, no new growth; releasing capacity wakes/completes. A packet that exceeds the entire reclaimed B (including scratch/workspace) errors or reports drain without waiting; exact-fit boundaries include overhead. Cancellation, retained idle slots, multiple readers and blocked merger cannot deadlock. |
 | L3-RSS-008 | GNU time wraps prebuilt core-only probe, generation/compilation outside measurement. Tiny bogus-input test retains 32 MiB ceiling; true oversize acceptance gets an explicitly larger justified ceiling. Budget-pressure run bounds touched peak to configured budget plus measured fixed margin. No raising the old capture-path gate to hide a regression. |
 | L3-PLAT-008 | Allocation counters plus Linux touched RSS and Windows commit/working-set evidence; 32-bit checked limits. Controls once with touched preallocation and unbudgeted-retention mutants, then discard mutants. Reserved-but-unwritten memory can evade RSS, so request/accounting assertions are mandatory. |
