@@ -46,6 +46,14 @@ other clauses continue to apply to both modes where relevant. Historical 0.1
 verification retains only its original clause/mode credit. Existing capture RSS
 gates and uncapped default recovery are unchanged.
 
+**Verification trace note:** retain the canonical IDs L1-CORE-002, L2-IO-002
+and L2-CAP-002, but qualify each verification reference with `@capture-0.1` or
+`@whole-0.2` (for example, `L2-IO-002@capture-0.1` versus
+`L2-IO-002@whole-0.2`). These are mode-qualified trace keys, not new obligations.
+Existing unqualified 0.1 evidence applies only to `@capture-0.1`; whole-packet
+evidence must explicitly identify `@whole-0.2`. No test/RSS result transfers
+credit across modes merely because the canonical ID is shared.
+
 Default B = 256 MiB fits a maximum 128 MiB setup packet only with block-based
 PacketBuf storage, bounded workspace and a normal pool. Coalescing that packet
 or using contiguous-only Vec storage requires a caller override with
@@ -94,7 +102,7 @@ aggregate CLI requirement receives verification credit.
 | --- | --- | --- |
 | L2-ADM-008 | L1-CORE-002, L1-CORE-004 | Default H = 134,217,728 bytes, caller-overridable. Apply explicit edition/type S. Above S, admit through NextHeader, stable Unconfirmed(ExactEof), or explicit StreamOptIn; retain authorization evidence. Enforce H/B/target limits in all cases. Setup S = 134,217,728 defaults to channel0/type01 only; non-default legacy_setup_any_channel explicitly extends it to type01 on other channels with evidence, never by inference. |
 | L2-BUD-008 | L1-CORE-002, L1-CORE-004 | Default shared B = 268,435,456 bytes, caller-overridable independently of H. Account for live/idle storage, metadata and growth workspace; grow only after real bytes arrive. A packet unable to fit the entire reclaimed B returns typed BudgetTooSmall or explicit reported drain, never waits. Temporary reclaimable pressure waits cancellably with deadlock-free ownership return; trim rare large capacity toward baseline. |
-| L2-WHOLE-008 | L1-CORE-002, L1-CORE-004 | Deliver one complete packet only after the declared frame arrives. Stable exact EOF admits an oversoft P <= H fitting B with Unconfirmed(ExactEof); recheck source identity/size before admission and after body consumption, returning SourceChanged on observed mutation. Declared end beyond EOF retains truncation-only handling. Drain/chunk modes are explicit, with provisional streaming evidence until completion. |
+| L2-WHOLE-008 | L1-CORE-002, L1-CORE-004 | Deliver one complete packet only after the declared frame arrives. On a seekable stable source, exact EOF admits an oversoft P <= H fitting B with Unconfirmed(ExactEof); recheck source identity/size before admission and after body consumption, returning SourceChanged on observed mutation. Declared end beyond EOF retains truncation-only handling. Drain/chunk modes are explicit, with provisional streaming evidence until completion. |
 
 ## L3: verification obligations
 
@@ -104,8 +112,8 @@ Coverage is clause-scoped in the slice evidence; planned probes are not passes.
 | --- | --- |
 | L3-HDR-001 → L2-HDR-001 | Hand-packed standard fields; known primary sum; checksum corruption at expected offset; arbitrary flag bytes. |
 | L3-LEN-001 → L2-LEN-001 | Minimum/alignment/overflow boundaries; recompute checksum after structural mutations so checksum rejection cannot mask the test. |
-| L3-IO-002 → L2-IO-002 | Preserved 0.1 capture mode: actual small file, three-byte short reads, Interrupted and real errors; CI-only isolated RSS on generated input in slice 8. |
-| L3-CAP-002 → L2-CAP-002 | Preserved 0.1 capture mode: zero/exact/over cap, DATA clamp, nonzero filler, partial capture, zero buffer, allocation failure handling. |
+| L3-IO-002 → L2-IO-002@capture-0.1 | Preserved 0.1 capture mode: actual small file, three-byte short reads, Interrupted and real errors; CI-only isolated RSS on generated input in slice 8. |
+| L3-CAP-002 → L2-CAP-002@capture-0.1 | Preserved 0.1 capture mode: zero/exact/over cap, DATA clamp, nonzero filler, partial capture, zero buffer, allocation failure handling. |
 | L3-REC-003 → L2-REC-003 | Cross-buffer/false sync; exact scanned counts; valid candidate at cap accepted, one byte beyond rejected; >1 MiB padding succeeds by default. |
 | L3-END-004 → L2-END-004 | Empty/no-sync/lone truncated input; complete packet then every header/body cut and zero/FF padding; preserve preceding results. |
 | L3-ERR-004 → L2-ERR-004 | Invalid structure fatal; short/invalid semantic body still delivered; terminal behavior and I/O errors during recovery retain evidence. |
@@ -130,12 +138,12 @@ source references are in [the design](design-0.2.md).
 | L3-DEFAULT-008 → L2-ADM-008, L2-BUD-008 | Whole-packet new()/Default H = 134,217,728 and B = 268,435,456; independent builder overrides preserve the other setting; defaults do not allocate H/B or alter 0.1 ReaderLimits. Feasibility still includes workspace/pool. |
 | L3-EOF-008 → L2-ADM-008, L2-WHOLE-008 | Stable exact EOF admitted with precisely Unconfirmed(ExactEof), whole bytes and no next-header/stream-opt-in requirement; one byte short takes truncation-only path; identity replacement or size mutation before admission/after body returns SourceChanged with no packet. Missing stability evidence cannot authorize ExactEof. |
 | L3-LEGACY-008 → L2-ADM-008 | Default off: channel0/type01 selects setup S, nonzero/type01 retains ordinary S. Explicit opt-in selects setup S on nonzero/type01 and records LegacySetupAnyChannel evidence. Other types, arbitrary Data Type Versions and guessed editions never enable it. H/B overrides still apply. |
-| L3-GROW-008 → L2-IO-002 | Authorized huge aligned P on tiny short-read input: allocation requests and touched RSS follow received bytes + fixed quantum; exact tail/preceding results. Mutant preallocating/zeroing P must fail. Include a hard-refusal case separately so it cannot mask the growth test. |
+| L3-GROW-008 → L2-IO-002@whole-0.2 | Authorized huge aligned P on tiny short-read input: allocation requests and touched RSS follow received bytes + fixed quantum; exact tail/preceding results. Mutant preallocating/zeroing P must fail. Include a hard-refusal case separately so it cannot mask the growth test. |
 | L3-ADM-008 → L2-ADM-008 | Real oversoft packet below/exactly/above H; valid/invalid/short next header; false checksum-valid payload header; seek restoration across buffering and recovery; final EOF and nonseek opt-in/refusal. Whole bytes and authorization evidence checked independently. |
 | L3-SETUP-008 → L2-ADM-008, L2-BUD-008 | At built-in H = 128 MiB and B = 256 MiB, a complete 128 MiB setup packet (P = H) is accepted with the default block-based representation; coalescing it under default B returns typed BudgetTooSmall without waiting, including with all other buffers returned. Contiguous coalescing/Vec requires B >= 2 x 128 MiB + overhead via caller override, or consume spans. Same size ordinary type needs NextHeader, Unconfirmed(ExactEof) or StreamOptIn; H=64 MiB refuses. Trimmed capacity returns after ownership is released. |
 | L3-BUD-008 → L2-BUD-008 | Instrument all live credits/capacity and transient workspace. Gate a worker with barriers: reader blocks at budget, no new growth; releasing capacity wakes/completes. A packet that exceeds the entire reclaimed B (including scratch/workspace) errors or reports drain without waiting; exact-fit boundaries include overhead. Cancellation, retained idle slots, multiple readers and blocked merger cannot deadlock. |
-| L3-RSS-008 → L2-IO-002, L2-BUD-008 | GNU time wraps prebuilt core-only probe, generation/compilation outside measurement. Tiny bogus-input test retains 32 MiB ceiling; true oversize acceptance gets an explicitly larger justified ceiling. Budget-pressure run bounds touched peak to configured budget plus measured fixed margin. No raising the old capture-path gate to hide a regression. |
-| L3-PLAT-008 → L2-IO-002, L2-BUD-008 | Allocation counters plus Linux touched RSS and Windows commit/working-set evidence; 32-bit checked limits. Controls once with touched preallocation and unbudgeted-retention mutants, then discard mutants. Reserved-but-unwritten memory can evade RSS, so request/accounting assertions are mandatory. |
+| L3-RSS-008 → L2-IO-002@whole-0.2, L2-BUD-008 | GNU time wraps prebuilt core-only probe, generation/compilation outside measurement. Tiny bogus-input test retains 32 MiB ceiling; true oversize acceptance gets an explicitly larger justified ceiling. Budget-pressure run bounds touched peak to configured budget plus measured fixed margin. No raising the old capture-path gate to hide a regression. |
+| L3-PLAT-008 → L2-IO-002@whole-0.2, L2-BUD-008 | Allocation counters plus Linux touched RSS and Windows commit/working-set evidence; 32-bit checked limits. Controls once with touched preallocation and unbudgeted-retention mutants, then discard mutants. Reserved-but-unwritten memory can evade RSS, so request/accounting assertions are mandatory. |
 
 ## Nine review slices (0.1 history)
 

@@ -13,6 +13,11 @@ These clauses apply to the **new whole-packet API**, as approved 2026-11-25 and
 applied in [requirements](requirements.md). Retain the 0.1 capture behavior and
 its independent-of-Packet-Length allocation rule.
 
+Verification uses mode-qualified trace keys for the shared IDs:
+L1-CORE-002, L2-IO-002 and L2-CAP-002 each have `@capture-0.1` and
+`@whole-0.2` scopes. Existing unqualified 0.1 evidence means capture scope; it
+never verifies whole-packet behavior. See the requirements trace note.
+
 | ID | Approved wording |
 | --- | --- |
 | L1-CORE-002 | Stream with memory bounded by caller limits and a shared aggregate storage budget, independent of recording length. Grow packet storage only as bytes are actually received, never by reserving a declared Packet Length. Include all live packet/pool storage, retained capacity and allocation/growth workspace in budget accounting. |
@@ -26,7 +31,7 @@ and L1-CORE-004. Tests below are L3 implementation obligations, **not passing
 checks**. No other clause, including uncapped default recovery, is relaxed.
 Owner approval of requirements does not authorize a release or publication.
 
-Proposed API boundary: the shared PacketReader framing engine gains an explicit
+Planned API boundary: the shared PacketReader framing engine gains an explicit
 whole-packet mode configured with a non_exhaustive resource policy and shared
 budget handle. It returns PacketBuf ownership plus header/ranges/offset, soft
 violation and authorization evidence; borrowed views expose complete spans and
@@ -228,7 +233,7 @@ NotChecked until a separate validation assignment.
 | --- | --- |
 | Bogus P mid-file | Never rescan inside an admitted incomplete frame. If lookahead fails, return Uncorroborated before allocation; if admitted, bytes through its declared end belong to it structurally, even if real packets are swallowed. Recovery cannot know payload truth. Preserve preceding packets. |
 | Bogus P at EOF | Admissible stream input grows only by actual bytes then returns TruncatedPacket (or NoCompletePacket with tail before any complete frame). Known seekable EOF shortfall uses truncation-only drain above. P > H instead returns HardLimit/reported drain. |
-| Approximate 4 GiB claim | u32's largest aligned P is 0xFFFFFFFC, not 2^32. With H=64 MiB/1 GiB this is rejected, not a tail. The receive-growth regression must explicitly authorize H/B/stream policy large enough, or exercise known-EOF truncation; no claim that rules A/B both override one another. |
+| Approximate 4 GiB claim | u32's largest aligned P is 0xFFFFFFFC, not 2^32. This is rejected under default H = 128 MiB or any caller override below 0xFFFFFFFC, not reported as a tail. The receive-growth regression must explicitly authorize H/B/stream policy large enough, or exercise known-EOF truncation; no claim that rules A/B both override one another. |
 | Legitimate oversize | S < P <= H plus NextHeader, Unconfirmed(ExactEof) or StreamOptIn, sufficient budget/workspace: deliver whole frame with soft-violation/authorization evidence. No cap inferred from actual file's type-version bytes. |
 | 128 MiB setup | Channel0/type01 under this edition is within S. Accept without oversize corroboration only if H/B/target permit; grow as bytes arrive, then return/drop excess capacity. Nonzero-channel type01 needs explicit legacy_setup_any_channel to select this allowance, recorded as evidence; other types never inherit it. |
 | Exact EOF / one byte short | Stable end == EOF and P <= H/fits B: admit, labelled Unconfirmed(ExactEof). End one byte beyond EOF: truncation-only path, no packet. Observed size/identity mutation: SourceChanged before delivery. |
