@@ -54,4 +54,6 @@ pub use admission::{
     DEFAULT_SMALL_BODY_CUTOFF, EditionPolicy, SourceStamp, StableSource, UnconfirmedReason,
     WholePolicy,
 };
-pub use whole::{PacketBuf, PacketInfo, WholeEvent, WholePacketReader};
+pub use whole::{
+    CoalescedPacket, CoalescingEvidence, PacketBuf, PacketInfo, WholeEvent, WholePacketReader,
+};

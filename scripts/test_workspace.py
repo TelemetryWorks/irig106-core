@@ -54,7 +54,7 @@ class WorkspaceContract(unittest.TestCase):
         expected.update(f"src/{name}.rs" for name in
                         ["lib", "header", "reader", "error", "integrity", "inspection", "sequence", "pool", "admission", "whole"])
         expected.update(f"tests/{name}.rs" for name in
-                        ["primary_header", "reader", "completion", "integrity", "inspection", "sequence", "pool", "whole", "read_strategy_bench"])
+                        ["coalescing", "primary_header", "reader", "completion", "integrity", "inspection", "sequence", "pool", "whole", "read_strategy_bench"])
         expected.update(["tests/support/watchdog.rs", "examples/inspect.rs", "examples/ordered.rs", "examples/rss_probe.rs", "examples/whole_resources.rs"])
         self.assertEqual(set(files), expected)
         self.assertEqual(

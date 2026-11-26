@@ -365,3 +365,27 @@ Output change: the public `inspect` and `ordered` example summaries append
 ordered reports whole-packet evidence. Existing fields and exit policies remain.
 The examples' Debug output is illustrative, not a stable serialization format.
 See [verification](verification-v02-admission-counts.md).
+
+
+### Explicit owned coalescing (owner decision 4B)
+
+`buf.coalesce_until(deadline)` returns an independent `CoalescedPacket` with
+borrowed frame()/data(), preserved info() and explicit evidence() describing the
+copy and its budget cost. Check contiguous() first; coalesce_until always copies,
+even for one block. Spans/contiguous() are the default allocation-free borrow. Original and copy
+are one transport packet, so inspect only one. The original is unchanged on error.
+
+B covers old blocks plus new capacity and metadata simultaneously. Default B
+refuses a maximum 128 MiB setup copy with BudgetTooSmall; raise B above 256 MiB
+plus overhead or consume spans. Copies may run concurrently with reader assembly:
+shared credits govern admission, with priority only for block-credit waiters
+(next_block_until). Readers queued for the assembly permit (begin_until) do not
+block copying. PoolStats::waiting includes both classes; waiting_for_credits
+is the subset that causes WouldBlock without idle eviction.
+Credit shortage also returns WouldBlock
+without evicting warm idle blocks; successful credit admission may reclaim idle
+storage and require re-warm. Release/retry explicitly. Unlike pool begin_until/
+next_block_until, coalesce_until never waits for credits: _until bounds only the
+copy, and shortage returns WouldBlock immediately; no try_ variant is needed. Deadlines/cancellation are cooperative between bounded copies,
+not inside allocation/page faults. PoolStats::coalesced_bytes are returnable live
+credits, included in used_bytes and released after storage. See [evidence](verification-v02-coalescing.md).

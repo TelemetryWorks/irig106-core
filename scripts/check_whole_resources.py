@@ -12,8 +12,8 @@ import threading
 
 # Active pressure has B=16 MiB; allow 8 MiB for process/allocator/thread overhead.
 CASES = {"bogus": 12, "admit": 80, "setup": 144, "refuse": 12,
-         "pressure-baseline": 12, "pressure": 16 + 8, "recovery": 12}
-PHASES = {"pressure-baseline": ["cold"], "bogus": ["cold", "short"], "admit": ["cold", "accepted", "trimmed"],
+         "pressure-baseline": 12, "pressure": 16 + 8, "recovery": 12, "coalesce": 272}
+PHASES = {"coalesce": ["cold", "accepted", "coalesced", "trimmed"], "pressure-baseline": ["cold"], "bogus": ["cold", "short"], "admit": ["cold", "accepted", "trimmed"],
           "setup": ["cold", "accepted", "trimmed"], "refuse": ["cold", "refused"],
           "pressure": ["cold", "blocked", "trimmed"], "recovery": ["cold", "recovered", "tail"]}
 
@@ -30,7 +30,13 @@ def validate(sample, memory_kib, ceiling_kib):
     blocks, idle = int(sample["blocks"]), int(sample["idle"])
     assert 0 <= idle <= blocks, sample
     assert int(sample["used"]) >= blocks * 524288, sample
+    coalesced = int(sample.get("coalesced", "0"))
+    assert coalesced >= 0 and int(sample["used"]) >= blocks * 524288 + coalesced, sample
     phase = sample["phase"]
+    if phase == "coalesced":
+        assert blocks == 256 and coalesced > 128 * 1024 * 1024, sample
+    else:
+        assert coalesced == 0, sample
     if phase in ["cold", "refused"]:
         assert blocks == 0, sample
     elif phase in ["short", "recovered", "tail"]:

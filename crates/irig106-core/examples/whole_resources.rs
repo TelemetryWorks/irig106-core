@@ -81,12 +81,13 @@ fn checkpoint(phase: &str, pool: &BlockPool) -> Result<(), Box<dyn StdError>> {
     let s = pool.stats()?;
     assert!(s.used_bytes <= s.budget_bytes);
     println!(
-        "phase={phase} pid={} budget={} used={} blocks={} idle={}",
+        "phase={phase} pid={} budget={} used={} blocks={} idle={} coalesced={}",
         std::process::id(),
         s.budget_bytes,
         s.used_bytes,
         s.allocated_blocks,
-        s.idle_blocks
+        s.idle_blocks,
+        s.coalesced_bytes
     );
     io::stdout().flush()?;
     let mut ack = [0]; // Host samples the STILL-LIVE process, then releases it.
@@ -108,6 +109,8 @@ fn main() -> Result<(), Box<dyn StdError>> {
     let pool = BlockPool::new(
         if matches!(case.as_str(), "pressure" | "pressure-baseline") {
             16 * MIB
+        } else if case == "coalesce" {
+            272 * MIB
         } else {
             DEFAULT_POOL_BUDGET
         },
@@ -208,7 +211,7 @@ fn main() -> Result<(), Box<dyn StdError>> {
         assert_eq!(pool.stats()?.idle_blocks, 8);
         checkpoint("trimmed", &pool)?;
     } else {
-        let setup = case == "setup";
+        let setup = matches!(case.as_str(), "setup" | "coalesce");
         assert!(setup || case == "admit" || case == "refuse");
         let p = if setup {
             128 * MIB as u32
@@ -257,6 +260,21 @@ fn main() -> Result<(), Box<dyn StdError>> {
             );
             assert!(buf.data_spans().flatten().all(|&b| b == 0x5a));
             checkpoint("accepted", &pool)?;
+            if case == "coalesce" {
+                let copy = buf.coalesce_until(deadline())?;
+                assert_eq!(copy.frame().len(), p as usize);
+                assert_eq!(copy.evidence().copied_bytes, p as usize);
+                assert_eq!(pool.stats()?.coalesced_bytes, copy.evidence().charged_bytes);
+                assert!(
+                    buf.frame_spans()
+                        .flatten()
+                        .copied()
+                        .eq(copy.frame().iter().copied())
+                );
+                checkpoint("coalesced", &pool)?;
+                drop(copy);
+                assert_eq!(pool.stats()?.coalesced_bytes, 0);
+            }
             buf.clear();
             assert_eq!(pool.stats()?.idle_blocks, 8);
             checkpoint("trimmed", &pool)?;
