@@ -76,6 +76,21 @@ body read; only bytes returned by Read become valid packet data. No speculative
 multi-block reservation from P is allowed. Cold initialized-block capacity is
 bounded granularity; logical growth still follows actual received bytes.
 
+The default pool uses **lazy warm-up**: construction allocates/pre-touches zero
+payload blocks. Its shared idle retention ceiling is **N = 8 blocks = 4 MiB**
+across the aggregate budget, not per reader/worker/channel. Demand populates only
+needed blocks; returning/trimming storage retains at most eight idle blocks,
+and pressure may release more. Do not eagerly fill the idle baseline. Together
+with measured process/control/allocator overhead, this small baseline must fit
+under the isolated tiny-input 32 MiB RSS ceiling.
+
+Default B holds at most 512 one-block packets by block bytes alone, fewer after
+metadata, scratch and idle storage. A maximum setup uses 256 blocks, leaving at
+most about 256 additional ordinary slots before overhead. A tiny packet still
+occupies a full 512 KiB block, so deep worker/queue pipelines encounter budget
+backpressure early. Size-class blocks are deferred unless later benchmarks
+justify them while preserving one-piece/direct-read behavior; not implemented now.
+
 ## L1: responsibilities
 
 | ID | Obligation | Source |
@@ -120,6 +135,12 @@ aggregate CLI requirement receives verification credit.
 | L2-WHOLE-008 | L1-CORE-002@whole-0.2, L1-CORE-004 | Deliver one complete packet only after the declared frame arrives. On a seekable stable source, exact EOF admits an oversoft P <= H fitting B with Unconfirmed(ExactEof); recheck source identity/size before admission and after body consumption, returning SourceChanged on observed mutation. Declared end beyond EOF retains truncation-only handling. Drain/chunk modes are explicit, with provisional streaming evidence until completion. |
 | L2-HOT-008 | L1-CORE-002@whole-0.2 | Default 524,288-byte blocks include headers/trailer; every P <= 524,288 packet fits one block as a single contiguous borrowed slice. Read normal bodies directly into final pooled storage (one kernel-to-user copy on direct file/pipe sources), without input BufReader/scratch staging or a second body copy. Reuse warmed blocks and packet/segment descriptors for zero steady-state per-packet allocations; consumers borrow payloads. Provision at most one budgeted fixed block before a body read and advance valid length only by returned bytes; never allocate from declared P. |
 
+**Refinement note:** L2-HOT-008 **refines L2-IO-002@whole-0.2** without changing
+the approved L2-IO-002 wording. In whole-packet mode, "buffered Read" means body
+bytes land directly in final pooled storage; headers and small control reads may
+use fixed scratch. Normal body bytes never take a BufReader-to-packet-buffer
+second copy. The 0.1 bounded-capture wording and behavior are unchanged.
+
 ## L3: verification obligations
 
 Coverage is clause-scoped in the slice evidence; planned probes are not passes.
@@ -151,16 +172,16 @@ source references are in [the design](design-0.2.md).
 
 | ID → L2 parent | Oracle and required probes |
 | --- | --- |
-| L3-BLOCK-008 → L2-HOT-008, L2-WHOLE-008 | Default block size is 524,288 bytes including all headers/trailer. Independent frames at small and maximum ordinary P, with/without secondary headers and each trailer width, occupy one block and expose their exact full bytes as one contiguous borrowed slice. An admitted P = 524,292 uses two blocks; maximum setup uses 256. No automatic coalescing. |
+| L3-BLOCK-008 → L2-HOT-008, L2-WHOLE-008 | Default block size is 524,288 bytes including all headers/trailer. Independent frames at small P and exactly P = 524,288, with/without secondary headers and each trailer width, occupy one block and expose their exact full bytes as one contiguous borrowed slice. An admitted P = 524,292 uses two blocks; maximum setup uses 256. No automatic coalescing. |
 | L3-HOT-008 → L2-HOT-008, L2-IO-002@whole-0.2, L2-BUD-008 | Instrument Read destinations to prove every body read targets the final pool block at its frame offset, never scratch/BufReader; short/Interrupted reads preserve this and never overread the frame. After pool/descriptor warm-up, allocation counting over many mixed ordinary packet sizes is zero (oracle storage preallocated). Borrow/lifetime checks reject owner reuse while views live. Cold EOF has at most one budgeted provisional block and no speculative P-sized request. |
-| L3-DEFAULT-008 → L2-ADM-008, L2-BUD-008 | Whole-packet new()/Default H = 134,217,728 and B = 268,435,456; independent builder overrides preserve the other setting; defaults do not allocate H/B or alter 0.1 ReaderLimits. Feasibility still includes workspace/pool. |
+| L3-DEFAULT-008 → L2-ADM-008, L2-BUD-008 | Whole-packet new()/Default H = 134,217,728, B = 268,435,456 and shared idle N = 8 (4 MiB). Construction allocates/pre-touches zero payload blocks; demand-only warm-up does not fill to N. After returns/trim, at most eight idle blocks remain across readers/slots; pressure may retain fewer. Independent H/B overrides preserve the other setting; defaults do not allocate H/B or alter 0.1 ReaderLimits. Feasibility still includes workspace/pool. |
 | L3-EOF-008 → L2-ADM-008, L2-WHOLE-008 | Stable exact EOF admitted with precisely Unconfirmed(ExactEof), whole bytes and no next-header/stream-opt-in requirement; one byte short takes truncation-only path; identity replacement or size mutation before admission/after body returns SourceChanged with no packet. Missing stability evidence cannot authorize ExactEof. |
 | L3-LEGACY-008 → L2-ADM-008 | Default off: channel0/type01 selects setup S, nonzero/type01 retains ordinary S. Explicit opt-in selects setup S on nonzero/type01 and records LegacySetupAnyChannel evidence. Other types, arbitrary Data Type Versions and guessed editions never enable it. H/B overrides still apply. |
 | L3-GROW-008 → L2-IO-002@whole-0.2 | Authorized huge aligned P on tiny short-read input: allocation requests and touched RSS follow received bytes + fixed quantum; exact tail/preceding results. Mutant preallocating/zeroing P must fail. Include a hard-refusal case separately so it cannot mask the growth test. |
 | L3-ADM-008 → L2-ADM-008 | Real oversoft packet below/exactly/above H; valid/invalid/short next header; false checksum-valid payload header; seek restoration across buffering and recovery; final EOF and nonseek opt-in/refusal. Whole bytes and authorization evidence checked independently. |
 | L3-SETUP-008 → L2-ADM-008, L2-BUD-008 | At built-in H = 128 MiB and B = 256 MiB, a complete 128 MiB setup packet (P = H) is accepted with the default block-based representation; coalescing it under default B returns typed BudgetTooSmall without waiting, including with all other buffers returned. Contiguous coalescing/Vec requires B >= 2 x 128 MiB + overhead via caller override, or consume spans. Same size ordinary type needs NextHeader, Unconfirmed(ExactEof) or StreamOptIn; H=64 MiB refuses. Trimmed capacity returns after ownership is released. |
 | L3-BUD-008 → L2-BUD-008 | Instrument all live credits/capacity and transient workspace. Gate a worker with barriers: reader blocks at budget, no new growth; releasing capacity wakes/completes. A packet that exceeds the entire reclaimed B (including scratch/workspace) errors or reports drain without waiting; exact-fit boundaries include overhead. Cancellation, retained idle slots, multiple readers and blocked merger cannot deadlock. |
-| L3-RSS-008 → L2-IO-002@whole-0.2, L2-BUD-008 | GNU time wraps prebuilt core-only probe, generation/compilation outside measurement. Tiny bogus-input test retains 32 MiB ceiling; true oversize acceptance gets an explicitly larger justified ceiling. Budget-pressure run bounds touched peak to configured budget plus measured fixed margin. No raising the old capture-path gate to hide a regression. |
+| L3-RSS-008 → L2-IO-002@whole-0.2, L2-BUD-008 | GNU time wraps prebuilt core-only probe, generation/compilation outside measurement. Cold-construction and lazily warmed tiny bogus-input tests retain the 32 MiB ceiling: assert zero construction payload blocks and post-trim idle <= 8, and measure process baseline plus at most 4 MiB idle payload, control storage and allocator margin; true oversize acceptance gets an explicitly larger justified ceiling. Budget-pressure run bounds touched peak to configured budget plus measured fixed margin. No raising the old capture-path gate to hide a regression. |
 | L3-PLAT-008 → L2-IO-002@whole-0.2, L2-BUD-008 | Allocation counters plus Linux touched RSS and Windows commit/working-set evidence; 32-bit checked limits. Controls once with touched preallocation and unbudgeted-retention mutants, then discard mutants. Reserved-but-unwritten memory can evade RSS, so request/accounting assertions are mandatory. |
 
 ## Nine review slices (0.1 history)
