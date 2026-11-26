@@ -1609,3 +1609,22 @@ fn adaptive_limited_header_does_not_limit_recovery_refills() {
         assert!(requests[2..].iter().all(|(_, n)| *n == 65_536));
     });
 }
+
+#[test]
+fn previous_large_includes_body_exactly_at_cutoff() {
+    watchdog(Duration::from_secs(5), || {
+        let pool = BlockPool::with_defaults().unwrap();
+        let mut buf = PacketBuf::new(pool.clone()).unwrap();
+        let mut bytes = frame(4120, 0, 9, 0);
+        bytes.extend(frame(28, 0, 9, 0));
+        let input = BoundaryProbe {
+            input: Cursor::new(bytes),
+            requests: Vec::with_capacity(4),
+            short_at: Some((0, 4120)),
+        };
+        let mut r = WholePacketReader::stream(input, WholePolicy::new(), pool).unwrap();
+        r.next_packet_into(&mut buf, deadline()).unwrap();
+        r.next_packet_into(&mut buf, deadline()).unwrap();
+        assert_eq!(r.into_inner().requests[1], (4120, 24));
+    });
+}

@@ -245,3 +245,127 @@ fn repeated_packets_do_not_grow_inventory() {
         (2, 4, 2)
     );
 }
+
+#[path = "support/watchdog.rs"]
+mod support;
+fn sequence(mut bytes: Vec<u8>, value: u8) -> Vec<u8> {
+    bytes[13] = value;
+    let sum = bytes[..22].chunks_exact(2).fold(0u16, |s, w| {
+        s.wrapping_add(u16::from_le_bytes([w[0], w[1]]))
+    });
+    bytes[22..24].copy_from_slice(&sum.to_le_bytes());
+    bytes
+}
+#[test]
+fn whole_metadata_matches_capture_inventory_without_payload_conversion() {
+    support::watchdog(std::time::Duration::from_secs(5), || {
+        use irig106_core::{BlockPool, PacketBuf, SequenceKind, WholePacketReader, WholePolicy};
+        use std::{
+            io::Cursor,
+            time::{Duration, Instant},
+        };
+        let mut input = sequence(frame(1, 9, 4), 254);
+        input.extend(sequence(frame(2, 3, 8), 10));
+        input.push(0x55);
+        input.extend(sequence(frame(2, 2, 4), 11));
+        input.extend(sequence(frame(1, 9, 12), 255));
+        input.extend(sequence(frame(1, 9, 4), 0));
+        let pool = BlockPool::with_defaults().unwrap();
+        let mut buffer = PacketBuf::new(pool.clone()).unwrap();
+        let mut whole =
+            WholePacketReader::stream(Cursor::new(input.clone()), WholePolicy::new(), pool)
+                .unwrap();
+        let mut capture = PacketReader::new(Cursor::new(input), ReaderLimits::new()).unwrap();
+        let mut a = Inspection::new(InspectionLimits::new(2, 3));
+        let mut b = Inspection::new(InspectionLimits::new(2, 3));
+        for (expected, offset) in [
+            (SequenceKind::First, 0),
+            (SequenceKind::First, 28),
+            (SequenceKind::Unverified, 61),
+            (SequenceKind::Unverified, 89),
+            (SequenceKind::Contiguous, 125),
+        ] {
+            whole
+                .next_packet_into(&mut buffer, Instant::now() + Duration::from_secs(2))
+                .unwrap();
+            let observed = a.observe_packet_info(buffer.info().unwrap()).unwrap();
+            let legacy = capture.next_packet(|_| 0).unwrap().unwrap();
+            let legacy = b.observe_with_sequence(&legacy).unwrap().unwrap();
+            assert_eq!(observed, legacy);
+            assert_eq!(observed.kind(), expected);
+            assert_eq!(observed.offset, offset);
+        }
+        assert!(
+            whole
+                .next_packet_into(&mut buffer, Instant::now() + Duration::from_secs(2))
+                .unwrap()
+                .is_none()
+        );
+        assert!(capture.next_packet(|_| 0).unwrap().is_none());
+        a.finish();
+        b.finish();
+        assert_eq!(a.totals(), b.totals());
+        assert_eq!(
+            (
+                a.totals().packets,
+                a.totals().data_bytes,
+                a.totals().packet_bytes
+            ),
+            (5, 32, 152)
+        );
+        assert_eq!(a.rows().collect::<Vec<_>>(), b.rows().collect::<Vec<_>>());
+        assert_eq!(
+            a.data_types().collect::<Vec<_>>(),
+            b.data_types().collect::<Vec<_>>()
+        );
+        assert_eq!(a.presence(), b.presence());
+        assert_eq!(a.status(), ScanStatus::Complete);
+        assert_eq!(a.presence().setup_record, Presence::Unknown);
+        assert_eq!(a.presence().recording_index, Presence::Present);
+        assert_eq!(a.presence().recording_events, Presence::Present);
+    });
+}
+#[test]
+fn whole_metadata_limits_and_terminal_status_preserve_prior_counts() {
+    support::watchdog(std::time::Duration::from_secs(5), || {
+        use irig106_core::{BlockPool, PacketBuf, WholePacketReader, WholePolicy};
+        use std::{
+            io::Cursor,
+            time::{Duration, Instant},
+        };
+        for (channel, kind, channels, rows) in [(2, 9, 1, 2), (1, 3, 2, 1)] {
+            let pool = BlockPool::with_defaults().unwrap();
+            let mut buffer = PacketBuf::new(pool.clone()).unwrap();
+            let bytes = [frame(1, 9, 4), frame(channel, kind, 4)].concat();
+            let mut r =
+                WholePacketReader::stream(Cursor::new(bytes), WholePolicy::new(), pool).unwrap();
+            let mut inventory = Inspection::new(InspectionLimits::new(channels, rows));
+            r.next_packet_into(&mut buffer, Instant::now() + Duration::from_secs(2))
+                .unwrap();
+            inventory
+                .observe_packet_info(buffer.info().unwrap())
+                .unwrap();
+            let before = inventory.totals();
+            r.next_packet_into(&mut buffer, Instant::now() + Duration::from_secs(2))
+                .unwrap();
+            let error = inventory
+                .observe_packet_info(buffer.info().unwrap())
+                .unwrap_err();
+            assert!(matches!(
+                (channel, error),
+                (2, InspectionError::ChannelLimit { .. }) | (1, InspectionError::RowLimit { .. })
+            ));
+            assert_eq!(inventory.totals(), before);
+            assert_eq!(
+                (inventory.channel_count(), inventory.rows().count()),
+                (1, 1)
+            );
+            inventory.finish();
+            assert_eq!(inventory.status(), ScanStatus::Incomplete);
+            assert_eq!(
+                inventory.observe_packet_info(buffer.info().unwrap()),
+                Err(InspectionError::Stopped)
+            );
+        }
+    });
+}
