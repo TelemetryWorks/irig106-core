@@ -174,7 +174,9 @@ the baseline. Ordinary returns do **not** trim at eight: retain the warmed
 high-water working set under B. Trim toward eight only when storage from a
 large assembly (more than eight actual blocks) returns, or under explicit budget
 pressure; pressure may release more, down to zero. This hysteresis avoids
-allocation churn when a multi-worker pipeline swings by more than eight blocks. Live worker-owned blocks are
+allocation churn when a multi-worker pipeline swings by more than eight blocks.
+The coordinator accepted this hysteresis clarification in the slice-2 assignment
+after #17 merged; the L3-HOT/DEFAULT/RSS updates record that instruction. Live worker-owned blocks are
 not idle and remain charged until returned. Keep metadata/control overhead
 bounded and measured so the 4 MiB idle payload footprint plus process baseline
 fits comfortably below the isolated 32 MiB tiny-input RSS ceiling.
@@ -276,16 +278,26 @@ input capacity without waiting for a result merger that itself waits for this
 packet. Return queues must accommodate all live slots. Fixed output/reorder
 budgets cannot participate in a circular wait with input credits.
 
-Temporary pressure from worker-held buffers blocks on a predicate/condition
-variable with cancellation, not a lock held during I/O or worker work. Returning
-capacity wakes the reader. Consumer-retained buffers can intentionally stall it;
-caller may cancel or set a wait deadline. If credits can no longer be reclaimed,
-return typed BudgetUnavailable rather than wait forever. Blocking I/O cancellation
-itself depends on the input adapter; a condition-variable wake cannot interrupt
-an arbitrary blocking Read. A caller choosing
-nonblocking budget acquisition receives WouldBlockBudget with explicitly retained
-assembly state; the first implementation may support only blocking/cancellable
-acquisition. No busy polling or automatic switch to drain/chunk mode.
+Temporary pressure is handled by an explicit wait policy. Default begin() and
+next_block() **never wait** for admission/credits: they return BudgetUnavailable
+when resources are retained, including same-thread retention with no returner.
+Callers expecting progress from another owner may choose begin_until() or
+next_block_until() with an absolute Instant deadline. Condvar::wait_timeout loops
+recheck readiness, cancellation and the same deadline after every wake, including
+spurious notifications; expiry returns typed DeadlineExceeded without cancelling
+the pool or consuming the remaining assembly slot. There is no unbounded wait API.
+
+Send transfers do not announce the current owning thread, so the pool does not
+infer reclaimability from a block's creation thread. No-deadline refusal safely
+covers all no-returner cases; explicit deadline waits remain bounded even if the
+caller mistakenly expects a return. Consumer-retained storage can no longer hang
+a default single-threaded reader. Readiness is checked before the wait deadline;
+deadlines bound condition-variable waits, not scheduling, allocation or I/O time.
+Cold allocation/zeroing runs outside the pool mutex after credits are claimed;
+failed or cancelled allocation releases the claim before waking waiters.
+Pool-wide cancel remains terminal and wakes both admission and checkout waits.
+Blocking I/O cancellation itself depends on the input adapter; a condition-variable
+wake cannot interrupt arbitrary Read. No polling or automatic drain/chunk fallback.
 
 On return of storage from a large assembly (more than eight blocks), trim
 excess idle blocks toward N = 8 and return credits; budget pressure is the other
@@ -347,7 +359,7 @@ No settings, overcommit policy or process limits are changed by this design.
 | L3-GROW-008 | Authorized huge aligned P on tiny short-read input: allocation requests and touched RSS follow received bytes + fixed quantum; exact tail/preceding results. Mutant preallocating/zeroing P must fail. Include a hard-refusal case separately so it cannot mask the growth test. |
 | L3-ADM-008 | Real oversoft packet below/exactly/above H; valid/invalid/short next header; false checksum-valid payload header; seek restoration across buffering and recovery; final EOF and nonseek opt-in/refusal. Whole bytes and authorization evidence checked independently. |
 | L3-SETUP-008 | At built-in H = 128 MiB and B = 256 MiB, a complete 128 MiB setup packet (P = H) is accepted with the default block-based representation; coalescing it under default B returns typed BudgetTooSmall without waiting, including with all other buffers returned. Contiguous coalescing/Vec requires B >= 2 x 128 MiB + overhead via caller override, or consume spans. Same size ordinary type needs NextHeader, Unconfirmed(ExactEof) or StreamOptIn; H=64 MiB refuses. Trimmed capacity returns after ownership is released. |
-| L3-BUD-008 | Instrument all live credits/capacity and transient workspace. Gate a worker with barriers: reader blocks at budget, no new growth; releasing capacity wakes/completes. A packet that exceeds the entire reclaimed B (including scratch/workspace) errors or reports drain without waiting; exact-fit boundaries include overhead. Cancellation, retained idle slots, multiple readers and blocked merger cannot deadlock. |
+| L3-BUD-008 | Instrument all live credits/capacity and transient workspace. Gate a worker with bounded handshakes: explicit-deadline checkout waits at budget, no new growth; releasing capacity wakes/completes. A packet that exceeds the entire reclaimed B (including scratch/workspace) errors or reports drain without waiting; exact-fit boundaries include overhead. Immediate BudgetUnavailable handles same-thread retained resources without waiting; absolute-deadline waits test expiry, spurious wakeups and reuse after timeout. Cancel with idle blocks must clear storage/credits. Test completion channels/joins are bounded independently of operation deadlines. Cancellation, retained idle slots, multiple readers and blocked merger cannot deadlock. |
 | L3-RSS-008 | GNU time wraps prebuilt core-only probe, generation/compilation outside measurement. Cold-construction and lazily warmed tiny bogus-input tests retain the 32 MiB ceiling: assert zero construction payload blocks and idle <= 8 after a large-return/pressure trim event, and measure process baseline plus at most 4 MiB idle payload, control storage and allocator margin; true oversize acceptance gets an explicitly larger justified ceiling. Budget-pressure run bounds touched peak to configured budget plus measured fixed margin. No raising the old capture-path gate to hide a regression. |
 | L3-PLAT-008 | Allocation counters plus Linux touched RSS and Windows commit/working-set evidence; 32-bit checked limits. Controls once with touched preallocation and unbudgeted-retention mutants, then discard mutants. Reserved-but-unwritten memory can evade RSS, so request/accounting assertions are mandatory. |
 
@@ -370,3 +382,12 @@ future packet owner calls trim_after_return with its actual returned block count
 not the declared length. Counts above eight trim; an explicit pressure call is
 the other trigger. Whole-packet assembly/valid-byte views, hard/soft admission,
 source-stability checks, direct I/O and coalescing remain later slices.
+
+At default B the current pool implementation admits at most **511** blocks after
+its control/per-block metadata charges (the 512 figure above is only a theoretical
+block-byte bound). A 256-block setup leaves at most 255 other pool blocks; later
+reader/workspace accounting may reduce this further. After a high-water ordinary
+burst, idle payload can remain near B until an explicit large-return or pressure
+trim; no automatic background pressure monitor exists. This retained-memory
+tradeoff is the coordinator-approved hysteresis behavior, not a promise of 4 MiB
+idle storage after every burst.

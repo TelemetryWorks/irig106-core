@@ -192,13 +192,24 @@ The Trusted Publishing pipeline keeps publication separately authorized.
 BlockPool::with_defaults() uses B = 256 MiB; new(bytes) is fallible. Construction
 reserves charged control descriptors, with zero 512 KiB payload blocks.
 BlockPool::begin(block_count) checks eventual feasibility without reserving payload
-and admits one BlockAssembly at a time. next_block() yields owned PooledBlock;
+and admits one BlockAssembly at a time. Default begin()/next_block() return
+BudgetUnavailable immediately on admission/credit pressure, including same-thread
+retention. Explicit begin_until()/next_block_until() use an absolute wait deadline,
+recheck predicates after spurious wakes and return DeadlineExceeded on expiry
+without cancelling the pool or consuming an assembly slot. Choose bounded waits
+only when another owner can make progress. Readiness is checked before expiry;
+the deadline bounds waiting, not I/O/allocation time. next_block() yields PooledBlock;
 storage_mut() is an initialized direct-read destination, not a valid packet view.
 Workers return blocks by Drop. Ordinary returns retain the warmed high-water set;
 trim_after_return(actual_packet_blocks) trims only above eight, and
 trim_for_pressure() explicitly trims idle storage to eight. The packet owner must
 call the former after returning that packet's actual storage, never from its P.
-Pool-wide cancel() is terminal and wakes admission/check-out waits. PoolError
+Pool-wide cancel() is terminal, clears idle storage/credits and wakes both waits.
+Cold allocation/zeroing occurs outside the mutex with credits claimed first;
+cancellation or allocator failure rolls that claim back. At default B, control
+and lease charges leave at most 511 blocks, including idle and worker-held blocks.
+Ordinary high-water idle storage can remain near B until explicit trim; there
+is no automatic pressure monitor. PoolError
 preserves typed budget/allocation/synchronization failures; PoolStats is accounted
 storage, not RSS. No new dependencies or unsafe library code. See
 [slice-2 evidence](verification-v02-s02.md) for partial requirement coverage;

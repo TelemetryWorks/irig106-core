@@ -38,3 +38,31 @@ coalescing/control-workspace reservation. Those require later slices. Full L3-HO
 GROW, BLOCK, SETUP, RSS and platform evidence is not earned by this pool test.
 Heavy qualification and the unchanged isolated RSS gate run in CI; exact-head
 run IDs are recorded in the PR, including the publishing-path dry run.
+
+## Review fixes: bounded waits and idle cancellation
+
+Tests-first 3a72ebd records the new deadline/unavailable contract (missing API
+compile failures are distinct from runtime evidence). A temporary probe on
+3edab6b reproduced same-thread retention entering an indefinite default wait;
+only an external cancel released it. The idle-cancel mutant now fails with two
+allocated/idle blocks instead of zero. Both probes/mutants were removed.
+
+Default acquisition is now nonwaiting BudgetUnavailable. Explicit absolute-deadline
+variants use wait_timeout and predicate loops; unit checks cover positive expiry,
+spurious notification without readiness, unchanged slot/credits after timeout,
+and reuse. Send does not expose transfer-thread identity: nonwaiting defaults
+handle all no-returner cases without guessing ownership. Bounded waiting is an
+explicit caller choice when another owner may release storage.
+
+Cold allocation is outside the mutex; a deterministic callback verifies try_lock
+and cancels during allocation, then checks claim rollback. Idle cancellation is
+idempotent and returns used bytes to fixed control cost. Integration workers use
+bounded acknowledgements and joins (5 s watchdog, 30 s operation deadlines), so
+missed notification/release mutants fail without waiting for a CI job timeout.
+Current-default admission accepts 511 blocks and rejects 512 without payload
+allocation; this is a storage-only bound, not a whole-reader capacity claim.
+
+One-off controls removed the block-return notification and assembly-release
+assignment separately. The integration test failed in 5.06 s and immediately,
+respectively (both exit 101); healthy code was restored. These are bounded test
+failures, not CI job timeouts.

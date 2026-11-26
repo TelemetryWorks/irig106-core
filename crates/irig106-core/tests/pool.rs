@@ -170,6 +170,12 @@ fn bounded_pool_ownership_pressure_cancellation_and_burst_hysteresis() {
         Err(PoolError::BudgetTooSmall { .. })
     ));
     assert!(matches!(pool.begin(0), Err(PoolError::InvalidRequest)));
+    let capacity = pool.begin(511).unwrap();
+    assert!(matches!(
+        pool.begin(512),
+        Err(PoolError::BudgetTooSmall { .. })
+    ));
+    drop(capacity);
     burst(&pool);
     assert_eq!(pool.stats().unwrap().block_allocations, 16);
     let retained = pool.stats().unwrap();
@@ -202,7 +208,7 @@ fn bounded_pool_ownership_pressure_cancellation_and_burst_hysteresis() {
     assert!(matches!(small.begin(1), Err(PoolError::BudgetUnavailable)));
     let next_pool = small.clone();
     let next =
-        thread::spawn(move || next_pool.begin_until(1, Instant::now() + Duration::from_secs(3)));
+        thread::spawn(move || next_pool.begin_until(1, Instant::now() + Duration::from_secs(30)));
     waiting(&small, 1);
     drop(first);
     let mut next = joined(next).unwrap();
@@ -213,7 +219,7 @@ fn bounded_pool_ownership_pressure_cancellation_and_burst_hysteresis() {
     ));
     assert_eq!(small.stats().unwrap().waiting, 0);
     let checkout =
-        thread::spawn(move || next.next_block_until(Instant::now() + Duration::from_secs(3)));
+        thread::spawn(move || next.next_block_until(Instant::now() + Duration::from_secs(30)));
     waiting(&small, 1);
     assert!(small.stats().unwrap().used_bytes <= BLOCK_BYTES + 4096);
     drop(block);
@@ -225,7 +231,7 @@ fn bounded_pool_ownership_pressure_cancellation_and_burst_hysteresis() {
         Err(PoolError::DeadlineExceeded)
     ));
     let p = admission.clone();
-    let pending = thread::spawn(move || p.begin_until(1, Instant::now() + Duration::from_secs(3)));
+    let pending = thread::spawn(move || p.begin_until(1, Instant::now() + Duration::from_secs(30)));
     waiting(&admission, 1);
     admission.cancel().unwrap();
     assert!(matches!(joined(pending), Err(PoolError::Cancelled)));
@@ -236,7 +242,7 @@ fn bounded_pool_ownership_pressure_cancellation_and_burst_hysteresis() {
     let p = small.clone();
     let pending = thread::spawn(move || {
         let mut a = p.begin(1)?;
-        a.next_block_until(Instant::now() + Duration::from_secs(3))
+        a.next_block_until(Instant::now() + Duration::from_secs(30))
     });
     waiting(&small, 1);
     small.cancel().unwrap();

@@ -3,6 +3,7 @@ use std::{
     collections::TryReserveError,
     fmt, mem,
     sync::{Arc, Condvar, Mutex, MutexGuard},
+    time::Instant,
 };
 /// Fixed payload capacity, including future packet headers/trailer.
 pub const BLOCK_BYTES: usize = 524_288;
@@ -24,6 +25,10 @@ pub enum PoolError {
     },
     /// Zero working set, exhausted assembly, or unsupported target-sized limit.
     InvalidRequest,
+    /// Admission or credits are unavailable; the default operation never waits.
+    BudgetUnavailable,
+    /// An explicit absolute wait deadline expired while resources were unavailable.
+    DeadlineExceeded,
     /// The caller cancelled this pool and all pending/future acquisitions.
     Cancelled,
     /// A synchronization failure; the pool must not be used again.
@@ -44,6 +49,10 @@ impl fmt::Display for PoolError {
                 write!(f, "storage needs {needed} bytes; budget is {limit}")
             }
             Self::InvalidRequest => f.write_str("invalid pool working set or target limit"),
+            Self::BudgetUnavailable => {
+                f.write_str("storage budget or assembly unavailable without waiting")
+            }
+            Self::DeadlineExceeded => f.write_str("storage wait deadline exceeded"),
             Self::Cancelled => f.write_str("storage pool cancelled"),
             Self::Poisoned => f.write_str("storage pool synchronization failed"),
             Self::UnexpectedCapacity => {
@@ -74,6 +83,8 @@ struct State {
     cancelled: bool,
     waiting: usize,
     allocations: u64,
+    #[cfg(test)]
+    wakes: usize,
 }
 #[derive(Debug)]
 struct Shared {
@@ -140,6 +151,8 @@ impl BlockPool {
                     cancelled: false,
                     waiting: 0,
                     allocations: 0,
+                    #[cfg(test)]
+                    wakes: 0,
                 }),
                 changed: Condvar::new(),
                 budget,
@@ -154,20 +167,48 @@ impl BlockPool {
     fn wait<'a>(
         &self,
         mut state: MutexGuard<'a, State>,
+        deadline: Option<Instant>,
     ) -> Result<MutexGuard<'a, State>, PoolError> {
+        let deadline = deadline.ok_or(PoolError::BudgetUnavailable)?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|duration| !duration.is_zero())
+            .ok_or(PoolError::DeadlineExceeded)?;
         state.waiting += 1;
-        let mut state = self
+        let (mut state, _) = self
             .shared
             .changed
-            .wait(state)
+            .wait_timeout(state, remaining)
             .map_err(|_| PoolError::Poisoned)?;
         state.waiting -= 1;
+        #[cfg(test)]
+        {
+            state.wakes += 1;
+        }
+        // The caller rechecks readiness/cancel and this same absolute deadline.
         Ok(state)
     }
     /// Acquire the sole assembly permit, after checking eventual feasibility.
     /// `blocks` is a maximum working set, not a reservation/allocation request.
-    /// Workers may retain earlier blocks while this permit waits for returns.
+    /// Never waits: contention returns BudgetUnavailable, including re-entry while
+    /// this thread holds an earlier permit. Use begin_until for bounded waiting.
     pub fn begin(&self, blocks: usize) -> Result<BlockAssembly, PoolError> {
+        self.begin_using(blocks, None)
+    }
+    /// Wait until the absolute deadline when another owner can release admission.
+    /// Readiness is checked first; the deadline bounds waiting, not allocation/I/O.
+    pub fn begin_until(
+        &self,
+        blocks: usize,
+        deadline: Instant,
+    ) -> Result<BlockAssembly, PoolError> {
+        self.begin_using(blocks, Some(deadline))
+    }
+    fn begin_using(
+        &self,
+        blocks: usize,
+        deadline: Option<Instant>,
+    ) -> Result<BlockAssembly, PoolError> {
         if blocks == 0 {
             return Err(PoolError::InvalidRequest);
         }
@@ -189,7 +230,7 @@ impl BlockPool {
                 state.assembling = true;
                 break;
             }
-            state = self.wait(state)?;
+            state = self.wait(state, deadline)?;
         }
         Ok(BlockAssembly {
             pool: self.clone(),
@@ -245,18 +286,26 @@ pub struct BlockAssembly {
     remaining: usize,
 }
 impl BlockAssembly {
-    /// Obtain one initialized final-storage block, waiting cancellably if needed.
+    /// Obtain one initialized final-storage block without waiting for credits.
+    /// Returns BudgetUnavailable if earlier retained blocks consume the budget.
     /// The caller must only acquire after filling the preceding block; this
     /// storage primitive has no knowledge of input arrival or valid frame length.
     pub fn next_block(&mut self) -> Result<PooledBlock, PoolError> {
-        self.next_block_using(|| {
-            let mut bytes = Vec::new();
-            bytes.try_reserve_exact(BLOCK_BYTES)?;
-            Ok(bytes)
-        })
+        self.next_block_using(None, Self::allocate)
+    }
+    /// Wait until an absolute deadline when another owner can return credits.
+    /// A timeout does not cancel the pool or consume an assembly slot.
+    pub fn next_block_until(&mut self, deadline: Instant) -> Result<PooledBlock, PoolError> {
+        self.next_block_using(Some(deadline), Self::allocate)
+    }
+    fn allocate() -> Result<Vec<u8>, PoolError> {
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(BLOCK_BYTES)?;
+        Ok(bytes)
     }
     fn next_block_using(
         &mut self,
+        deadline: Option<Instant>,
         allocate: impl FnOnce() -> Result<Vec<u8>, PoolError>,
     ) -> Result<PooledBlock, PoolError> {
         if self.remaining == 0 {
@@ -272,6 +321,7 @@ impl BlockAssembly {
             }
             if state.allocated < self.pool.shared.max_blocks {
                 state.allocated += 1; // Claim before reservation/initialization.
+                drop(state); // Cold allocation/zeroing must not block worker returns.
                 let result = allocate().and_then(|mut bytes| {
                     if bytes.capacity() != BLOCK_BYTES {
                         return Err(PoolError::UnexpectedCapacity);
@@ -279,6 +329,13 @@ impl BlockAssembly {
                     bytes.resize(BLOCK_BYTES, 0);
                     Ok(bytes)
                 });
+                state = self.pool.lock()?;
+                if state.cancelled {
+                    drop(result); // Free before returning the provisional credit.
+                    state.allocated -= 1;
+                    self.pool.shared.changed.notify_all();
+                    return Err(PoolError::Cancelled);
+                }
                 match result {
                     Ok(bytes) => {
                         state.allocations = state.allocations.saturating_add(1);
@@ -286,11 +343,12 @@ impl BlockAssembly {
                     }
                     Err(error) => {
                         state.allocated -= 1;
+                        self.pool.shared.changed.notify_all();
                         return Err(error);
                     }
                 }
             }
-            state = self.pool.wait(state)?;
+            state = self.pool.wait(state, deadline)?;
         };
         self.remaining -= 1;
         Ok(PooledBlock {
@@ -356,7 +414,7 @@ mod tests {
         let pool = BlockPool::with_defaults().unwrap();
         let before = pool.stats().unwrap().used_bytes;
         let mut assembly = pool.begin(1).unwrap();
-        let error = assembly.next_block_using(|| {
+        let error = assembly.next_block_using(None, || {
             let mut bytes = Vec::new();
             bytes.try_reserve_exact(usize::MAX)?;
             Ok(bytes)
@@ -364,7 +422,7 @@ mod tests {
         assert!(matches!(error, Err(PoolError::Allocation { .. })));
         assert_eq!(pool.stats().unwrap().used_bytes, before);
         assert!(matches!(
-            assembly.next_block_using(|| Ok(Vec::new())),
+            assembly.next_block_using(None, || Ok(Vec::new())),
             Err(PoolError::UnexpectedCapacity)
         ));
         assert_eq!(pool.stats().unwrap().used_bytes, before);
@@ -377,13 +435,76 @@ mod tests {
         let fixed = pool.stats().unwrap().used_bytes;
         let mut a = pool.begin(2).unwrap();
         let blocks = [a.next_block().unwrap(), a.next_block().unwrap()];
-        drop(a); drop(blocks);
+        drop(a);
+        drop(blocks);
         assert_eq!(pool.stats().unwrap().idle_blocks, 2);
         pool.cancel().unwrap();
         let cancelled = pool.stats().unwrap();
         assert_eq!((cancelled.allocated_blocks, cancelled.idle_blocks), (0, 0));
         assert_eq!(cancelled.used_bytes, fixed);
         pool.cancel().unwrap();
+        assert_eq!(pool.stats().unwrap().used_bytes, fixed);
+    }
+    #[test]
+    fn deadlines_expire_without_cancelling_or_consuming_resources() {
+        use std::time::Duration;
+        let pool = BlockPool::new(BLOCK_BYTES + 4096).unwrap();
+        let mut owner = pool.begin(1).unwrap();
+        assert!(matches!(
+            pool.begin_until(1, Instant::now() + Duration::from_millis(1)),
+            Err(PoolError::DeadlineExceeded)
+        ));
+        let block = owner.next_block().unwrap();
+        drop(owner);
+        let mut next = pool.begin(1).unwrap();
+        assert!(matches!(
+            next.next_block_until(Instant::now() + Duration::from_millis(1)),
+            Err(PoolError::DeadlineExceeded)
+        ));
+        assert_eq!(pool.stats().unwrap().waiting, 0);
+        drop(block);
+        // Readiness is checked before the wait deadline; the failed attempt kept its slot.
+        drop(next.next_block_until(Instant::now()).unwrap());
+    }
+    #[test]
+    fn spurious_notification_rechecks_predicate_and_cancellation() {
+        use std::{thread, time::Duration};
+        let pool = BlockPool::with_defaults().unwrap();
+        let owner = pool.begin(1).unwrap();
+        let p = pool.clone();
+        let worker =
+            thread::spawn(move || p.begin_until(1, Instant::now() + Duration::from_secs(30)));
+        let wait_for = |predicate: fn(&State) -> bool| {
+            let limit = Instant::now() + Duration::from_secs(5);
+            while !predicate(&pool.lock().unwrap()) {
+                assert!(Instant::now() < limit);
+                thread::yield_now();
+            }
+        };
+        wait_for(|s| s.waiting == 1);
+        pool.shared.changed.notify_all(); // No resource became available.
+        wait_for(|s| s.wakes > 0 && s.waiting == 1);
+        pool.cancel().unwrap();
+        let limit = Instant::now() + Duration::from_secs(5);
+        while !worker.is_finished() {
+            assert!(Instant::now() < limit);
+            thread::yield_now();
+        }
+        assert!(matches!(worker.join().unwrap(), Err(PoolError::Cancelled)));
+        drop(owner);
+    }
+    #[test]
+    fn cold_allocation_unlocks_and_cancel_rolls_back() {
+        let pool = BlockPool::with_defaults().unwrap();
+        let fixed = pool.stats().unwrap().used_bytes;
+        let mut assembly = pool.begin(1).unwrap();
+        let result = assembly.next_block_using(None, || {
+            assert!(pool.shared.state.try_lock().is_ok());
+            assert_eq!(pool.stats().unwrap().allocated_blocks, 1);
+            pool.cancel()?;
+            BlockAssembly::allocate()
+        });
+        assert!(matches!(result, Err(PoolError::Cancelled)));
         assert_eq!(pool.stats().unwrap().used_bytes, fixed);
     }
     #[test]
