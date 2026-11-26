@@ -96,3 +96,45 @@ resume a consumed frame; into_inner discards at most 8 KiB recovery read-ahead.
 The low-level pool's resumable deadline contract is distinct. Error::kind maps
 Cancelled and provably permanent BudgetUnavailable to Other, with a dedicated
 test; only temporary WouldBlock requests the corresponding retry classification.
+
+
+## Pending owner decision: ordinary small-body strategy
+
+The coordinator confirms review items 1–6 and places **HOLD** on changing the
+production small-body path. Ordinary production bodies remain direct reads into
+pooled blocks; recovery's accepted bounded scratch exception is unchanged.
+The test-only small_body_read_strategy_benchmark compares the same production
+reader/pool against an **external fixed 64 KiB BufReader prototype**. Small bodies
+are copied from that buffer; large reads can bypass it after any buffered prefix.
+This is measured decision input, not an adopted core mode or relaxed L2-HOT-008.
+
+Corpus: homogeneous 28 B, 400 B, 4 KiB, 64 KiB and 512 KiB complete frames, DATA
+occupying the entire body. Each size uses floor(16 MiB / P) complete frames.
+Construction, generation, opening files and first block initialization are outside
+timing. Source files are newly written/warm-cache; the same pool/buffer is reused.
+Three runs per mode alternate order; output selects each mode's median duration
+and reports frame count, bytes, source Read calls, measured Linux **read syscalls**,
+elapsed seconds, packets/s and decimal MB/s. The EOF read is included.
+Borrowed complete slices are black-boxed and first/last-byte digests/counts checked.
+The fixed prototype buffer is additional memory outside B in this harness; any
+adoption needs owner approval and real budget/cursor/recovery integration.
+
+Linux syscall evidence comes from /proc/thread-self/io syscr, excluding the
+single counter-read contribution between snapshots. Calibration asserts that its
+delta matches file Read calls; other platforms label the kernel counter unsupported.
+This counts read-family calls, not all process syscalls. No ptrace, tools,
+dependencies or machine settings are added. It measures this thread only, avoiding
+unrelated test-runner I/O. There is no timing pass/fail threshold and these are
+warm-cache file results, not physical-disk or decode throughput.
+
+Reproduce the default qualification (CI, bounded to <=32 MiB per corpus):
+
+```sh
+CARGO_BUILD_JOBS=2 cargo test --release -p irig106-core --test whole --locked small_body_read_strategy_benchmark -- --ignored --exact --nocapture
+```
+
+A local smoke run uses IRIG106_SMALL_BODY_BENCH_BYTES=1048576 in a debug build;
+all ten size/mode pairs passed kernel-counter calibration and output checks.
+Its timings are not substituted for the release-mode CI decision table, recorded
+with the exact-head run in the PR. This assignment changes no production Rust,
+public API, requirement, manifest, publishing policy or small-body strategy.
