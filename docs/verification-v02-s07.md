@@ -6,6 +6,9 @@ excluded from this assignment; their outstanding owner decisions are unchanged.
 Tests-first 6d3e3e8 records the missing resource-validator failure and target-limit
 oracles. Exact-head CI results and one-off control run IDs are recorded in the PR.
 
+Post-#25 review tightens the small whole-mode gates, isolates pressure baseline
+and adds macOS measurement; the capture gate remains unchanged.
+
 ## Isolated whole-reader controls
 
 CI builds `whole_resources` in release mode BEFORE measurement. Synthetic Read/
@@ -17,19 +20,32 @@ samples the still-live process. Collection, acknowledgements and joins are bound
 
 | Case | Independent oracle | Ceiling |
 | --- | --- | --- |
-| Cold/tiny bogus | Whole reader construction has zero payload blocks. Ordinary P=128 MiB, H/B defaults and explicit stream opt-in, only 28 physical bytes: typed NoCompletePacket/TruncatedPacket, no delivered packet, at most one retained block. | 32 MiB |
+| Cold/tiny bogus | Whole reader construction has zero payload blocks. Ordinary P=128 MiB, H/B defaults and explicit stream opt-in, only 28 physical bytes: typed NoCompletePacket/TruncatedPacket, no delivered packet, at most one retained block. | 12 MiB |
 | Oversoft admitted | 64 MiB ordinary frame, valid next primary header at declared end: NextHeader evidence, 128 complete spans, exact DATA bytes, next frame offset and EOF. | 80 MiB |
 | Maximum setup | 128 MiB channel0/type01, default H/B, WithinSoft, 256 complete spans and exact DATA; next frame and EOF. | 144 MiB |
-| Oversoft refused | Same declared 64 MiB frame but invalid following header; Uncorroborated, zero payload blocks. | 32 MiB |
-| Recovery/padding | Two 28-byte frames around a 48 MiB recovery gap, then 48 MiB padding. Exact offsets/recovered/tail/scanned counts, only one retained block and terminal EOF. | 32 MiB |
-| Budget pressure | B=16 MiB, three held 4 MiB packets; fourth build waits at 31 allocated blocks/zero idle, used <= B. Returning one wakes completion; explicit trim retains eight. | 32 MiB |
+| Oversoft refused | Same declared 64 MiB frame but invalid following header; Uncorroborated, zero payload blocks. | 12 MiB |
+| Recovery/padding | Two 28-byte frames around a 48 MiB recovery gap, then 48 MiB padding. Exact offsets/recovered/tail/scanned counts, only one retained block and terminal EOF. | 12 MiB |
+| Pressure baseline | Same B=16 MiB/reader as active pressure, stopping after cold construction with zero payload blocks; separately measured process. | 12 MiB |
+| Budget pressure | B=16 MiB, three held 4 MiB packets; fourth build waits at 31 allocated blocks/zero idle, used <= B. Returning one wakes completion; explicit trim retains eight. | 24 MiB (B + 8 MiB) |
 
 Large gates allow payload plus a fixed 16 MiB process/allocator/stack margin;
-small cases retain the 32 MiB ceiling. These are scoped falsification thresholds,
+small whole-mode cases use 12 MiB, including a separate pressure-baseline process.
+The reviewer-observed small peaks of 2.4–4.6 MiB leave roughly 8 MiB leak sensitivity.
+Active pressure uses **24 MiB = B (16 MiB) + 8 MiB** for executable/runtime,
+allocator/page rounding and the worker thread; B already covers core buffers and
+workspace, so this margin is process overhead, not permission to exceed B.
+The observed active pressure peaks of 18–20 MiB fit while an extra 8 MiB retention
+would exceed the ceiling. Admitted 64/128 MiB packet ceilings stay 80/144 MiB.
+The capture-mode 32 MiB gate is unchanged. These are scoped falsification thresholds,
 not a general memory guarantee. Pool accounting is independently asserted and
 is not equated to process memory. Ordinary-return hysteresis remains unchanged.
 Linux GNU time wraps the prebuilt core process alone and records lifetime peak
-resident pages. Reserved but untouched capacity is invisible to RSS.
+resident pages. macOS CI uses native /usr/bin/time -l -o, parsing exactly one
+maximum-resident-set-size field and rounding **bytes** up to KiB, per
+[Apple time source](https://github.com/apple-oss-distributions/shell_cmds/blob/main/time/time.c)
+and [Apple getrusage documentation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/getrusage.2).
+Missing/duplicate reports and one-byte-over-ceiling values fail closed.
+Reserved but untouched capacity is invisible to RSS.
 
 Windows PowerShell runs outside the measured process. At each held checkpoint it
 refreshes private committed bytes/working set plus lifetime peak paged bytes and
