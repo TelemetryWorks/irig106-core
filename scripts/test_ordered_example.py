@@ -51,6 +51,15 @@ def main(binary):
             "packets=3 status=Complete",
         ])
         assert out.index("control offset=28") < out.index("dispatch offset=28")
+    out = run(binary, "uncertain-setup", frame(7, 1) + frame(), 0, [
+        "uncertain-control offset=0 kind=0x01 edition=Irig106_24R1",
+        "dispatch offset=0 channel=7 worker=1 revision=0",
+        "dispatch offset=28 channel=1 worker=1 revision=0",
+        "worker=1 packets=2 data_bytes=8 revision=0 revision_sum=0",
+        "packets=2 status=Complete", "setup_record: Absent",
+    ])
+    assert out.index("uncertain-control offset=0") < out.index("dispatch offset=0")
+    assert not any(line.startswith("control ") for line in out.splitlines())
     run(binary, "burst", b"".join(frame(i % 2, 9, i // 2) for i in range(64)), 0,
         ["worker=0 packets=32", "worker=1 packets=32", "packets=64 status=Complete"])
     run(binary, "multispan", frame(0, 1, length=524292) + frame(), 0,
