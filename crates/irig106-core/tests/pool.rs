@@ -69,7 +69,7 @@ fn joined<T>(handle: thread::JoinHandle<T>) -> T {
     handle.join().unwrap()
 }
 fn burst(pool: &BlockPool) {
-    let warm_admission = pool.begin(1).unwrap();
+    let warm_admission = pool.try_begin(1).unwrap();
     let (done, completed) = sync_channel(4);
     let (mut inputs, mut releases, mut workers) = (Vec::new(), Vec::new(), Vec::new());
     for _ in 0..4 {
@@ -107,8 +107,8 @@ fn burst(pool: &BlockPool) {
         }
         for index in 0..16 {
             let block = measured(|| {
-                let mut assembly = pool.begin(1).unwrap();
-                let mut block = assembly.next_block().unwrap();
+                let mut assembly = pool.try_begin(1).unwrap();
+                let mut block = assembly.try_next_block().unwrap();
                 block.storage_mut()[0] = index as u8;
                 block
             });
@@ -166,13 +166,13 @@ fn bounded_pool_ownership_pressure_cancellation_and_burst_hysteresis() {
     );
     assert!(cold.used_bytes < BLOCK_BYTES); // Control metadata only, no payload pretouch.
     assert!(matches!(
-        pool.begin(usize::MAX),
+        pool.try_begin(usize::MAX),
         Err(PoolError::BudgetTooSmall { .. })
     ));
-    assert!(matches!(pool.begin(0), Err(PoolError::InvalidRequest)));
-    let capacity = pool.begin(511).unwrap();
+    assert!(matches!(pool.try_begin(0), Err(PoolError::InvalidRequest)));
+    let capacity = pool.try_begin(511).unwrap();
     assert!(matches!(
-        pool.begin(512),
+        pool.try_begin(512),
         Err(PoolError::BudgetTooSmall { .. })
     ));
     drop(capacity);
@@ -186,36 +186,36 @@ fn bounded_pool_ownership_pressure_cancellation_and_burst_hysteresis() {
     assert_eq!(pool.stats().unwrap().idle_blocks, 16);
     pool.trim_for_pressure().unwrap();
     assert_eq!(pool.stats().unwrap().idle_blocks, 8);
-    let mut large = pool.begin(9).unwrap();
+    let mut large = pool.try_begin(9).unwrap();
     let mut blocks = Vec::new();
     for _ in 0..9 {
-        blocks.push(large.next_block().unwrap());
+        blocks.push(large.try_next_block().unwrap());
     }
-    assert!(matches!(large.next_block(), Err(PoolError::InvalidRequest)));
+    assert!(matches!(large.try_next_block(), Err(PoolError::InvalidRequest)));
     drop(large);
     drop(blocks);
     assert_eq!(pool.stats().unwrap().idle_blocks, 9);
     pool.trim_after_return(9).unwrap();
     assert_eq!(pool.stats().unwrap().idle_blocks, 8);
     let small = BlockPool::new(BLOCK_BYTES + 4096).unwrap();
-    let mut first = small.begin(1).unwrap();
-    let block = first.next_block().unwrap();
+    let mut first = small.try_begin(1).unwrap();
+    let block = first.try_next_block().unwrap();
     assert_eq!(block.storage().len(), BLOCK_BYTES);
     assert!(matches!(
-        small.begin(2),
+        small.try_begin(2),
         Err(PoolError::BudgetTooSmall { .. })
     ));
-    assert!(matches!(small.begin(1), Err(PoolError::BudgetUnavailable)));
+    assert!(matches!(small.try_begin(1), Err(PoolError::WouldBlock)));
     let next_pool = small.clone();
     let next =
         thread::spawn(move || next_pool.begin_until(1, Instant::now() + Duration::from_secs(30)));
     waiting(&small, 1);
     drop(first);
     let mut next = joined(next).unwrap();
-    // No helper exists on this thread to release the earlier block: do not wait.
+    // Explicit nonblocking policy, without inferring who owns the earlier block.
     assert!(matches!(
-        next.next_block(),
-        Err(PoolError::BudgetUnavailable)
+        next.try_next_block(),
+        Err(PoolError::WouldBlock)
     ));
     assert_eq!(small.stats().unwrap().waiting, 0);
     let checkout =
@@ -225,7 +225,7 @@ fn bounded_pool_ownership_pressure_cancellation_and_burst_hysteresis() {
     drop(block);
     drop(joined(checkout).unwrap());
     let admission = BlockPool::with_defaults().unwrap();
-    let owner = admission.begin(1).unwrap();
+    let owner = admission.try_begin(1).unwrap();
     assert!(matches!(
         admission.begin_until(1, Instant::now()),
         Err(PoolError::DeadlineExceeded)
@@ -236,19 +236,19 @@ fn bounded_pool_ownership_pressure_cancellation_and_burst_hysteresis() {
     admission.cancel().unwrap();
     assert!(matches!(joined(pending), Err(PoolError::Cancelled)));
     drop(owner);
-    let mut held = small.begin(1).unwrap();
-    let block = held.next_block().unwrap();
+    let mut held = small.try_begin(1).unwrap();
+    let block = held.try_next_block().unwrap();
     drop(held);
     let p = small.clone();
     let pending = thread::spawn(move || {
-        let mut a = p.begin(1)?;
+        let mut a = p.try_begin(1)?;
         a.next_block_until(Instant::now() + Duration::from_secs(30))
     });
     waiting(&small, 1);
     small.cancel().unwrap();
     assert!(matches!(joined(pending), Err(PoolError::Cancelled)));
     drop(block);
-    assert!(matches!(small.begin(1), Err(PoolError::Cancelled)));
+    assert!(matches!(small.try_begin(1), Err(PoolError::Cancelled)));
     assert_eq!(small.stats().unwrap().allocated_blocks, 0);
     // Cancel must clear idle storage as well as outstanding-return handling.
     assert_eq!(pool.stats().unwrap().idle_blocks, 8);
