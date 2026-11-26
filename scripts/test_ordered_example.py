@@ -35,13 +35,17 @@ def main(binary):
         "control offset=0 revision=1", "control offset=56 revision=2",
         "dispatch offset=28 channel=1 worker=1 revision=1 sequence=First",
         "dispatch offset=84 channel=1 worker=1 revision=2 sequence=Contiguous",
-        "worker=0 packets=3 data_bytes=12 revision=2",
-        "worker=1 packets=2 data_bytes=8 revision=2",
+        "worker=0 packets=3 data_bytes=12 revision=2 revision_sum=5",
+        "worker=1 packets=2 data_bytes=8 revision=2 revision_sum=3",
         "packets=5 status=Complete", "recording_index: Absent",
     ])
     assert out.index("control offset=56") < out.index("dispatch offset=56")
     run(binary, "burst", b"".join(frame(i % 2, 9, i // 2) for i in range(64)), 0,
         ["worker=0 packets=32", "worker=1 packets=32", "packets=64 status=Complete"])
+    run(binary, "multispan", frame(0, 1, length=524292) + frame(), 0,
+        ["worker=0 packets=1 data_bytes=524268 revision=1 revision_sum=1",
+         "worker=1 packets=1 data_bytes=4 revision=1 revision_sum=1",
+         "packets=2 status=Complete"])
     run(binary, "recovery", frame(sequence=8) + b"\xff" * 4096 + frame(sequence=9), 0,
         ["sequence=Unverified", "packets=2 status=Complete", "recording_index: Unknown"])
     run(binary, "tail", frame() + b"\xff", 0,
@@ -52,7 +56,7 @@ def main(binary):
         ["packets=1 status=Incomplete"], "terminal tail")
     # A multi-block oversoft stream is not authorized merely by using workers.
     run(binary, "oversoft", frame() + frame(length=524292), 3,
-        ["packets=1 status=Incomplete", "worker=1 packets=1"], "corroboration")
+        ["packets=1 status=Incomplete", "worker=1 packets=1"], "uncorroborated")
     print("ordered revisions, affine routing, bounded bursts, recovery, tails and refusal pass")
 
 

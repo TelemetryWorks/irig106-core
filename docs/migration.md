@@ -79,3 +79,15 @@ unsafe code, obsolete flag meanings or growing diagnostic vectors into core.
 - The crate's runnable documentation example demonstrates bounded complete-DATA
   capture using an independent four-byte fixture. A decoder remains responsible
   for payload validity, including when the entire DATA field was captured.
+
+
+## Unreleased 0.2 whole-packet orchestration example
+
+`cargo run -p irig106-core --example ordered --locked < recording.ch10` uses
+WholePacketReader and four reusable PacketBuf owners with two bounded workers.
+Observe PacketInfo once on the ordered producer before transferring ownership.
+Workers borrow spans; don't convert to captured Packet or feed inventory twice.
+Control revisions are illustrative notifications, not a downstream setup/time
+implementation. Read the [ordering and optional streaming contract](streaming.md)
+before integrating context, cancellation or output merging. CI executes independent
+stdin fixtures with an external timeout; downstream integration is still separate.

@@ -84,6 +84,10 @@ jobs:
         run: |
           cargo build -p irig106-core --example inspect --locked
           python3 scripts/test_inspect_example.py target/debug/examples/inspect
+      - name: Run ordered whole-packet consumer fixtures
+        run: |
+          cargo build -p irig106-core --example ordered --locked
+          python3 scripts/test_ordered_example.py target/debug/examples/ordered
       - run: cargo doc --workspace --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings

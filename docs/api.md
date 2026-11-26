@@ -331,3 +331,12 @@ the scoped test. This is not a claim about arbitrary worker/channel allocations.
 Ordinary returns retain the warmed high-water storage; a rare large return or
 explicit pressure trim can require re-warm before that guarantee resumes. See
 [slice-5 evidence](verification-v02-s05.md).
+
+### Ordered consumer and optional delivery contract (0.2 slice 6)
+
+The executable `ordered` example moves complete owning buffers through bounded
+channel-affine workers, with inspection/control notifications on the producer.
+See [the consumer/streaming contract](streaming.md) for setup/time ordering,
+credit-return/shutdown rules, live-input limits and the proposed provisional
+Begin/Chunk/End/Abort protocol. Only the whole-packet example is implemented;
+no new streaming API or inventory admission counters are introduced.
