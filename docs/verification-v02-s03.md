@@ -43,3 +43,8 @@ Final provenance regression: Unknown(7), channel0/type01, explicit legacy option
 earns the setup allowance only through that option and must report it as used.
 The added table case observed false instead of true before the evidence fix;
 admission itself is unchanged. Known 24R1 channel0 still needs no legacy evidence.
+
+Truncated large assembly cleanup includes its partial/provisional block: an
+eight-full-block prefix plus partial ninth originally left nine idle blocks,
+missing the large-return trim. The regression now returns all nine together and
+trims to eight, with no complete packet exposed.

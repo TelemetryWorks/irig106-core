@@ -306,8 +306,12 @@ impl<R: Read> WholePacketReader<R> {
         let mut assembly = self.pool.begin_until(count, deadline)?;
         let mut received = 24;
         while buf.blocks.len() < count {
-            let mut block = assembly.next_block_until(deadline)?;
+            let block = assembly.next_block_until(deadline)?;
             let start = buf.blocks.len() * BLOCK_BYTES;
+            // Retain the provisional descriptor too: error/EOF cleanup must
+            // return and trim the complete actual working set, including it.
+            buf.blocks.push(block);
+            let block = buf.blocks.last_mut().unwrap();
             let valid = (length - start).min(BLOCK_BYTES);
             let mut filled = if start == 0 {
                 block.storage_mut()[..24].copy_from_slice(header.as_bytes());
@@ -327,8 +331,6 @@ impl<R: Read> WholePacketReader<R> {
                     return self.tail(offset);
                 }
             }
-            // Capacity was fallibly reserved/charged at PacketBuf construction.
-            buf.blocks.push(block);
         }
         debug_assert_eq!(received, length);
         self.unchanged(before)?;

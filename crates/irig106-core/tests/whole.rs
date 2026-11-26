@@ -664,3 +664,24 @@ fn uncorroborated_size_is_refused_before_waiting_for_build_admission() {
     assert_eq!(pool.stats().unwrap().waiting, 0);
     drop(owner);
 }
+
+#[test]
+fn truncated_large_assembly_returns_and_trims_its_partial_block_too() {
+    let pool = BlockPool::with_defaults().unwrap();
+    let mut buf = PacketBuf::new(pool.clone()).unwrap();
+    let mut bytes = frame((10 * BLOCK_BYTES) as u32, 0, 9, 0);
+    bytes.truncate(8 * BLOCK_BYTES + 28);
+    let mut r = WholePacketReader::stream(
+        Cursor::new(bytes),
+        WholePolicy::new().with_stream_opt_in(true),
+        pool.clone(),
+    )
+    .unwrap();
+    assert!(matches!(
+        r.next_packet_into(&mut buf, deadline()).unwrap_err().reason,
+        ErrorKind::NoCompletePacket { .. }
+    ));
+    assert_eq!(pool.stats().unwrap().block_allocations, 9);
+    assert_eq!(pool.stats().unwrap().idle_blocks, 8);
+    assert!(buf.info().is_none());
+}
