@@ -1891,10 +1891,7 @@ fn refused_coalescing_never_reserves_frame_storage() {
             } else {
                 matches!(result, Err(PoolError::WouldBlock))
             });
-            assert!(
-                largest < p,
-                "refusal requested {largest} bytes for frame {p}"
-            );
+            assert_eq!(largest, 0, "refusal allocated storage for frame {p}");
             assert_eq!(pool.stats().unwrap().coalesced_bytes, 0);
             assert!(buf.info().is_some());
             drop(held);

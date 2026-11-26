@@ -350,6 +350,11 @@ impl BlockPool {
                 limit: self.shared.budget,
             });
         }
+        // Give already waiting readers first access to returned credits.
+        // Refuse before any idle eviction; active assembly alone is allowed.
+        if state.waiting > 0 {
+            return Err(PoolError::WouldBlock);
+        }
         // Returnable copy credits can coexist with an active assembly. Claims
         // and next_block's provisional allocated count share this same lock.
         let base = self.shared.fixed + state.workspace + state.coalesced;
@@ -599,6 +604,34 @@ mod tests {
         assert_eq!(pool.stats().unwrap().used_bytes, before);
         drop(assembly.try_next_block().unwrap());
         assert_eq!(pool.stats().unwrap().allocated_blocks, 1);
+    }
+    #[test]
+    fn waiting_reader_has_priority_without_idle_eviction() {
+        let pool = BlockPool::new(2 * BLOCK_BYTES + 131072).unwrap();
+        let mut assembly = pool.try_begin(2).unwrap();
+        let source = assembly.try_next_block().unwrap();
+        drop(assembly.try_next_block().unwrap());
+        // Model the mutex-visible window after a block returns but before a
+        // notified credit waiter re-acquires the lock. No scheduler race needed.
+        pool.lock().unwrap().waiting = 1;
+        let before = pool.stats().unwrap();
+        assert_eq!(before.idle_blocks, 1);
+        assert!(matches!(
+            pool.coalescing(BLOCK_BYTES / 2, 1),
+            Err(PoolError::WouldBlock)
+        ));
+        let after = pool.stats().unwrap();
+        assert_eq!(after.used_bytes, before.used_bytes);
+        assert_eq!(after.allocated_blocks, before.allocated_blocks);
+        assert_eq!(after.idle_blocks, before.idle_blocks);
+        assert_eq!(after.coalesced_bytes, 0);
+        pool.lock().unwrap().waiting = 0;
+        // The active assembly itself is no barrier; only waiter priority was.
+        let copy = pool.coalescing(BLOCK_BYTES / 2, 1).unwrap();
+        let admitted = pool.stats().unwrap();
+        assert_eq!(admitted.idle_blocks, 0);
+        assert!(admitted.used_bytes <= admitted.budget_bytes);
+        drop((copy, source, assembly));
     }
     #[test]
     fn cancel_clears_idle_blocks_and_credits() {

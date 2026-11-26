@@ -489,6 +489,7 @@ outstanding here; approval is no longer pending. No release is authorized.
 
 [Coalescing evidence](verification-v02-coalescing.md) covers opt-in owned copies,
 old+new accounting, concurrent reader/copy credit admission without credit waits,
+priority for already waiting builds (WouldBlock without idle eviction),
 side-effect-free WouldBlock, deadline/cancel rollback and
 max-setup default refusal/raised-budget acceptance. Separate coalesced credits
 are returnable and do not make later frame feasibility permanently fail. The next

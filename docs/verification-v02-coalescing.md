@@ -29,8 +29,10 @@ Unlike pool begin_until/next_block_until, coalesce_until never waits for credits
 _until bounds only the copy, and a shortage returns WouldBlock immediately.
 Credit preflight accounts all reclaimable idle blocks before eviction; WouldBlock
 preserves warm idle storage. Successful credit admission may reclaim idle blocks,
-requiring re-warm. There is no waiting-build priority gate: copies never wait,
-and a reader can wait cancellably with a deadline for copies/input to return.
+requiring re-warm. Coordinator follow-up: an already waiting build has priority;
+coalescing returns WouldBlock before eviction while state.waiting > 0. Active
+assembly alone remains allowed. A reader can wait cancellably with a deadline
+for copies/input to return.
 The orchestrator must release input before waiting for an output merger. The caller may
 release owners/retry; no fallback or silent discard is selected by core. Deadline
 and pool cancellation are checked before/after and between <=512 KiB copies;
@@ -71,13 +73,19 @@ WouldBlock path. The revised preflight permits concurrent copies without changin
 permanent workspace during assembly. A reader paused after one body block permits
 a worker copy; after resuming, it waits at B until the worker releases its original
 input, then completes with the copy still live. Accounting is asserted at each
-handshake. No special waiting-build fairness policy is imposed.
+handshake. The coordinator follow-up adds waiting-build priority without
+reintroducing assembly exclusivity. A deterministic unit test models the
+mutex-visible returned-idle/before-waiter-reacquisition window: a waiting build
+refuses the copy without changing idle/allocated/used/coalesced credits. With
+waiting cleared, the same copy succeeds and evicts idle storage even while the
+assembly remains active. This test fails on 29ec8c8 (copy wrongly succeeds),
+and kills removal of the new fairness gate.
 
 A platform-independent binary search finds exact minimal B: used==B succeeds,
 B-1 returns BudgetTooSmall with exact needed/limit (M9), and PacketBuf construction
 with a live exact-fit copy returns WouldBlock without exceeding B (M11). Existing
 test-only allocator instrumentation now tracks largest alloc/realloc requests:
-BudgetTooSmall and WouldBlock refusals request no frame-sized allocation (M1).
+BudgetTooSmall and WouldBlock refusals request no allocation at all (M1).
 Patterned bytes across eight sizes catch span displacement and prove even a
 one-block explicit coalesce owns a separate copy. Reported metadata charge is
 pinned against the copied owner's size. Source/lease drop ordering is unchanged.
