@@ -346,6 +346,7 @@ fn whole_metadata_limits_and_terminal_status_preserve_prior_counts() {
                 .observe_packet_info(buffer.info().unwrap())
                 .unwrap();
             let before = inventory.totals();
+            let admission_before = inventory.admission_counts();
             r.next_packet_into(&mut buffer, Instant::now() + Duration::from_secs(2))
                 .unwrap();
             let error = inventory
@@ -356,6 +357,7 @@ fn whole_metadata_limits_and_terminal_status_preserve_prior_counts() {
                 (2, InspectionError::ChannelLimit { .. }) | (1, InspectionError::RowLimit { .. })
             ));
             assert_eq!(inventory.totals(), before);
+            assert_eq!(inventory.admission_counts(), admission_before);
             assert_eq!(
                 (inventory.channel_count(), inventory.rows().count()),
                 (1, 1)
@@ -401,5 +403,59 @@ fn whole_tail_consumer_keeps_unseen_facts_unknown() {
         assert_eq!(inventory.totals().packets, 1);
         assert_eq!(inventory.status(), ScanStatus::Incomplete);
         assert_eq!(inventory.presence().recording_index, Presence::Unknown);
+    });
+}
+
+#[test]
+fn whole_admission_counts_partition_authorizations_and_report_coverage() {
+    support::watchdog(std::time::Duration::from_secs(5), || {
+        use irig106_core::{BlockPool, PacketBuf, SourceStamp, StableSource, WholePacketReader, WholePolicy};
+        use std::{io::{self, Cursor, Read, Seek, SeekFrom}, time::{Duration, Instant}};
+        struct Stable(Cursor<Vec<u8>>);
+        impl Read for Stable { fn read(&mut self, b: &mut [u8]) -> io::Result<usize> { self.0.read(b) } }
+        impl Seek for Stable { fn seek(&mut self, p: SeekFrom) -> io::Result<u64> { self.0.seek(p) } }
+        impl StableSource for Stable {
+            fn source_stamp(&mut self) -> io::Result<SourceStamp> {
+                Ok(SourceStamp::new(self.0.get_ref().len() as u64, 1, 0))
+            }
+        }
+        let mut inventory = Inspection::new(InspectionLimits::new(2, 3));
+        assert_eq!(inventory.admission_counts(), Default::default());
+        // WithinSoft; NextHeader; ExactEof; StreamOptIn; legacy used; legacy enabled but unused.
+        for case in 0..6 {
+            let (channel, kind, data) = match case {
+                1..=3 => (0, 9, 524_292 - 24),
+                4 => (7, 1, 4),
+                5 => (0, 1, 4),
+                _ => (0, 9, 4),
+            };
+            let mut bytes = frame(channel, kind, data);
+            if case == 1 { bytes.extend(frame(0, 9, 4)); }
+            let pool = BlockPool::with_defaults().unwrap();
+            let mut packet = PacketBuf::new(pool.clone()).unwrap();
+            let policy = WholePolicy::new().with_stream_opt_in(case == 3)
+                .with_legacy_setup_any_channel(case >= 4);
+            let until = Instant::now() + Duration::from_secs(2);
+            if matches!(case, 1 | 2) {
+                let mut r = WholePacketReader::seek_checked(Stable(Cursor::new(bytes)), policy, pool).unwrap();
+                r.next_packet_into(&mut packet, until).unwrap();
+            } else {
+                let mut r = WholePacketReader::stream(Cursor::new(bytes), policy, pool).unwrap();
+                r.next_packet_into(&mut packet, until).unwrap();
+            }
+            inventory.observe_packet_info(packet.info().unwrap()).unwrap();
+        }
+        let a = inventory.admission_counts();
+        assert_eq!((a.evaluated_packets, a.over_soft, a.within_soft, a.next_header,
+            a.unconfirmed_exact_eof, a.stream_opt_in, a.legacy_setup_any_channel), (6, 3, 3, 1, 1, 1, 1));
+        assert_eq!(a.evaluated_packets, a.within_soft + a.next_header + a.unconfirmed_exact_eof + a.stream_opt_in);
+        // Capture mode has no size authorization evidence; never invent WithinSoft.
+        inventory.observe(&event(0, 9, 4)).unwrap();
+        assert_eq!(inventory.totals().packets, 7);
+        assert_eq!(inventory.admission_counts(), a);
+        inventory.mark_incomplete();
+        inventory.finish();
+        assert_eq!(inventory.admission_counts(), a);
+        assert_eq!(inventory.status(), ScanStatus::Incomplete);
     });
 }
