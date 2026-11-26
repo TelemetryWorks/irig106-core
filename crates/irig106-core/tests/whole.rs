@@ -1783,3 +1783,33 @@ fn whole_reader_workers_reuse_buffers_and_inspect_without_warm_allocations() {
         assert_eq!(inventory.presence().recording_events, Presence::Absent);
     });
 }
+
+#[test]
+fn target_sized_limits_fail_before_payload_allocation() {
+    watchdog(Duration::from_secs(5), || {
+        let unrepresentable = isize::MAX as usize + 1;
+        assert!(matches!(BlockPool::new(unrepresentable), Err(PoolError::InvalidRequest)));
+        let pool = BlockPool::with_defaults().unwrap();
+        let used = pool.stats().unwrap().used_bytes;
+        let policy = WholePolicy::new().with_read_ahead_bytes(unrepresentable);
+        assert!(matches!(WholePacketReader::stream(Cursor::new([]), policy, pool.clone()),
+            Err(Error { reason: ErrorKind::Pool { source: PoolError::InvalidRequest }, .. })));
+        assert_eq!(pool.stats().unwrap().used_bytes, used);
+        if usize::BITS == 32 {
+            // Hand-packed largest aligned u32 P; only 28 physical bytes exist.
+            let mut bytes = frame(28, 0, 9, 0);
+            bytes[4..8].copy_from_slice(&0xffff_fffcu32.to_le_bytes());
+            let sum = bytes[..22].chunks_exact(2).fold(0u16, |s, w| {
+                s.wrapping_add(u16::from_le_bytes([w[0], w[1]]))
+            });
+            bytes[22..24].copy_from_slice(&sum.to_le_bytes());
+            let mut buf = PacketBuf::new(pool.clone()).unwrap();
+            let mut reader = WholePacketReader::stream(Cursor::new(bytes),
+                WholePolicy::new().with_hard_limit(u32::MAX).with_stream_opt_in(true), pool.clone()).unwrap();
+            assert!(matches!(reader.next_packet_into(&mut buf, deadline()),
+                Err(Error { reason: ErrorKind::Admission { source: AdmissionError::TargetLimit }, .. })));
+            assert_eq!(pool.stats().unwrap().allocated_blocks, 0);
+            assert!(buf.info().is_none());
+        }
+    });
+}
