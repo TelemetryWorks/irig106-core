@@ -484,6 +484,7 @@ fn setup_scope_unknown_edition_and_header_versions_are_explicit() {
         (2, EditionPolicy::Irig106_24R1, false, false),
         (0, EditionPolicy::Unknown(7), false, false),
         (2, EditionPolicy::Unknown(7), true, true),
+        (0, EditionPolicy::Unknown(7), true, true),
     ] {
         let pool = BlockPool::with_defaults().unwrap();
         let mut buf = PacketBuf::new(pool.clone()).unwrap();

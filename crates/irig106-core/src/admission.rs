@@ -68,7 +68,9 @@ impl WholePolicy {
         self.hard
     }
     pub(crate) fn evidence(&self, h: &Header) -> AdmissionEvidence {
-        let legacy = self.legacy && h.data_type() == 1 && h.channel() != 0;
+        let legacy = self.legacy
+            && h.data_type() == 1
+            && !(self.edition == EditionPolicy::Irig106_24R1 && h.channel() == 0);
         let setup = h.data_type() == 1
             && (self.legacy || (self.edition == EditionPolicy::Irig106_24R1 && h.channel() == 0));
         let soft_limit = if setup { DEFAULT_HARD_LIMIT } else { 524_288 };
