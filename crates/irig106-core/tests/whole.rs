@@ -45,7 +45,7 @@ impl StableSource for Stable {
         Ok(SourceStamp::new(
             self.input.get_ref().len() as u64,
             1,
-            u128::from(self.change && self.input.position() > 24),
+            u128::from(self.change && self.input.position() == self.input.get_ref().len() as u64),
         ))
     }
 }
@@ -292,7 +292,9 @@ fn body_destinations_are_final_storage_even_with_short_and_interrupted_reads_cas
         records: Vec::with_capacity(128),
         interrupt: false,
     };
-    let mut r = WholePacketReader::stream(input, WholePolicy::new(), pool).unwrap();
+    let mut r =
+        WholePacketReader::stream(input, WholePolicy::new().with_small_body_cutoff(0), pool)
+            .unwrap();
     r.next_packet_into(&mut buf, deadline()).unwrap();
     let bytes = buf.contiguous().unwrap();
     assert_eq!(bytes, expected);
@@ -389,7 +391,7 @@ fn recovery_and_policy_refusals_are_terminal_and_keep_offsets_case() {
         }
     ));
     assert_eq!(r.position(), 24);
-    assert_eq!(r.into_inner().input.position(), 24);
+    assert_eq!(r.into_inner().input.position(), 65_536);
     let mut bytes = vec![0x55];
     bytes.extend(frame(28, 0, 9, 0));
     for cap in [0, 1] {
@@ -419,7 +421,7 @@ fn budget_impossibility_and_temporary_pressure_use_distinct_typed_errors() {
     );
 }
 fn budget_impossibility_and_temporary_pressure_use_distinct_typed_errors_case() {
-    let pool = BlockPool::new(BLOCK_BYTES + 65536).unwrap();
+    let pool = BlockPool::new(BLOCK_BYTES + 196608).unwrap();
     let mut buf = PacketBuf::new(pool.clone()).unwrap();
     let mut r = WholePacketReader::stream(
         Cursor::new(frame(524_292, 0, 1, 0)),
@@ -584,7 +586,8 @@ impl Read for Denied {
         if self.0.position() >= 24 {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
-        self.0.read(b)
+        let n = b.len().min(24 - self.0.position() as usize);
+        self.0.read(&mut b[..n])
     }
 }
 #[test]
@@ -637,7 +640,7 @@ fn worker_return_unblocks_whole_reader_within_same_aggregate_budget() {
     );
 }
 fn worker_return_unblocks_whole_reader_within_same_aggregate_budget_case() {
-    let pool = BlockPool::new(BLOCK_BYTES + 65536).unwrap();
+    let pool = BlockPool::new(BLOCK_BYTES + 196608).unwrap();
     let mut buf = PacketBuf::new(pool.clone()).unwrap();
     let mut r = WholePacketReader::stream(
         Cursor::new(frame(28, 0, 9, 0)),
@@ -661,7 +664,7 @@ fn worker_return_unblocks_whole_reader_within_same_aggregate_budget_case() {
         assert!(Instant::now() < watchdog);
         std::thread::yield_now();
     }
-    assert!(pool.stats().unwrap().used_bytes <= BLOCK_BYTES + 65536);
+    assert!(pool.stats().unwrap().used_bytes <= BLOCK_BYTES + 196608);
     drop(block);
     while !worker.is_finished() {
         assert!(Instant::now() < watchdog);
@@ -712,7 +715,7 @@ fn failed_probe_restores_cursor_and_never_falls_back_to_stream_trust_case() {
     let e = r.next_packet_into(&mut buf, deadline()).unwrap_err();
     assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
     assert_eq!(e.position, 24);
-    assert_eq!(r.into_inner().0.input.position(), 24);
+    assert_eq!(r.into_inner().0.input.position(), 65_536);
     assert_eq!(pool.stats().unwrap().block_allocations, 0);
 }
 
@@ -888,7 +891,7 @@ fn frame_feasibility_precedes_both_probe_and_known_short_drain() {
 }
 fn frame_feasibility_precedes_both_probe_and_known_short_drain_case() {
     for short in [false, true] {
-        let pool = BlockPool::new(BLOCK_BYTES + 65536).unwrap();
+        let pool = BlockPool::new(BLOCK_BYTES + 196608).unwrap();
         let mut buf = PacketBuf::new(pool.clone()).unwrap();
         let mut bytes = frame(524_292, 0, 9, 0);
         if short {
@@ -919,7 +922,7 @@ fn frame_feasibility_precedes_both_probe_and_known_short_drain_case() {
         assert_eq!(r.position(), 24);
         let source = r.into_inner();
         assert_eq!(source.reads, 1);
-        assert_eq!(source.stamps, 0);
+        assert_eq!(source.stamps, 1); // Construction snapshots stability before prefetch.
     }
 }
 #[test]
@@ -1142,6 +1145,7 @@ fn recovery_chunk_boundaries_and_short_interrupted_input_keep_exact_bytes_case()
 }
 
 struct HybridProbe {
+    header_only: bool,
     input: Cursor<Vec<u8>>,
     observations: std::sync::Arc<std::sync::Mutex<Vec<(u64, usize, usize)>>>,
 }
@@ -1152,7 +1156,7 @@ impl Read for HybridProbe {
             .lock()
             .unwrap()
             .push((position, out.as_ptr() as usize, out.len()));
-        let wanted = if position == 0 {
+        let wanted = if position == 0 && self.header_only {
             out.len().min(24)
         } else {
             out.len()
@@ -1177,6 +1181,7 @@ fn hybrid_cutoff_selects_copy_or_final_destination_and_preserves_next_header() {
             bytes.extend(frame(28, 1, 9, 0));
             let observations = std::sync::Arc::new(std::sync::Mutex::new(Vec::with_capacity(8)));
             let input = HybridProbe {
+                header_only: true,
                 input: Cursor::new(bytes),
                 observations: observations.clone(),
             };
@@ -1227,6 +1232,7 @@ fn hybrid_large_final_fragment_stays_direct_and_buffer_is_budgeted() {
         let before = pool.stats().unwrap();
         let observations = std::sync::Arc::new(std::sync::Mutex::new(Vec::with_capacity(8)));
         let input = HybridProbe {
+            header_only: true,
             input: Cursor::new(frame(524_292, 0, 9, 0)),
             observations: observations.clone(),
         };
@@ -1271,5 +1277,82 @@ fn hybrid_invalid_buffer_configuration_is_typed_before_allocation() {
             ));
             assert_eq!(pool.stats().unwrap().used_bytes, before);
         }
+    });
+}
+
+#[test]
+fn hybrid_large_body_drains_prefetch_then_uses_final_block_destinations() {
+    watchdog(Duration::from_secs(5), || {
+        let pool = BlockPool::with_defaults().unwrap();
+        let mut buf = PacketBuf::new(pool.clone()).unwrap();
+        let expected = frame(524_292, 0, 9, 0);
+        let observations = std::sync::Arc::new(std::sync::Mutex::new(Vec::with_capacity(8)));
+        let input = HybridProbe {
+            header_only: false,
+            input: Cursor::new(expected.clone()),
+            observations: observations.clone(),
+        };
+        let mut r =
+            WholePacketReader::stream(input, WholePolicy::new().with_stream_opt_in(true), pool)
+                .unwrap();
+        r.next_packet_into(&mut buf, deadline()).unwrap();
+        let spans: Vec<_> = buf.frame_spans().collect();
+        assert_eq!(
+            spans
+                .iter()
+                .flat_map(|b| b.iter())
+                .copied()
+                .collect::<Vec<_>>(),
+            expected
+        );
+        let records = observations.lock().unwrap();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].2, 65_536);
+        assert_eq!(
+            records[1],
+            (
+                65_536,
+                spans[0].as_ptr() as usize + 65_536,
+                BLOCK_BYTES - 65_536
+            )
+        );
+        assert_eq!(
+            records[2],
+            (BLOCK_BYTES as u64, spans[1].as_ptr() as usize, 4)
+        );
+    });
+}
+#[test]
+fn hybrid_prefetch_mutation_is_detected_against_constructor_snapshot() {
+    watchdog(Duration::from_secs(5), || {
+        let pool = BlockPool::with_defaults().unwrap();
+        let mut buf = PacketBuf::new(pool.clone()).unwrap();
+        let mut source = stable(frame(128, 0, 9, 0));
+        source.change = true;
+        let mut r =
+            WholePacketReader::seek_checked(source, WholePolicy::new(), pool.clone()).unwrap();
+        assert!(matches!(
+            r.next_packet_into(&mut buf, deadline()).unwrap_err().reason,
+            ErrorKind::Admission {
+                source: AdmissionError::SourceChanged,
+                ..
+            }
+        ));
+        assert_eq!(r.position(), 24);
+        assert_eq!(pool.stats().unwrap().block_allocations, 0);
+        let error = WholePacketReader::stream(
+            &[][..],
+            WholePolicy::new().with_read_ahead_bytes(DEFAULT_POOL_BUDGET),
+            pool,
+        )
+        .err()
+        .unwrap();
+        assert!(matches!(
+            error.reason,
+            ErrorKind::Pool {
+                source: PoolError::BudgetTooSmall { .. },
+                ..
+            }
+        ));
     });
 }

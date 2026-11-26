@@ -190,46 +190,53 @@ block, so worker/queue depth can reach backpressure with few valid payload bytes
 Size-class blocks are a possible later optimization only if benchmarks justify
 it and the one-piece/direct-read requirements remain satisfied; not this slice.
 
-### Direct-read hot path (L2-HOT-008)
+### Owner-approved hybrid hot path (L2-HOT-008, 2026-11-26)
 
-Read each body directly from the unbuffered source into its final pooled block.
-For raw file/pipe input this targets one kernel-to-user payload copy: never read
-normal body bytes into input BufReader/scratch and then append/copy them into
-PacketBuf. The small fixed primary header may be copied into the first block;
-header/probe/recovery and explicit drain scratch are separate from the normal
-body path. Bound each read by K, the block's remaining space and remaining frame
-bytes, so it cannot prefetch another packet's body. Probes read only header bytes.
-Secondary/trailer reads also land at their final frame offsets.
+Owner Option A supersedes the normal-body one-copy rule using evidence from
+[runs 45740882675](https://github.com/TelemetryWorks/irig106-core/actions/runs/45740882675)
+and [45741995400](https://github.com/TelemetryWorks/irig106-core/actions/runs/45741995400).
+Whole mode owns **one fixed 64 KiB read-ahead buffer by default**, fallibly reserved
+at construction from caller policy and charged to B. Headers, recovery and small
+body reads share it; the old separate recovery-only allocation is gone.
 
-Acquire an existing initialized pool block (or fallibly provision one fixed block
-on a cold/exceptional path), charge its capacity before reading, and read into
-its final writable slice. Safe Read needs initialized destination storage; fixed
-block initialization is a bounded cold-path cost, never zeroing/reserving P.
-Only the returned n>0 bytes advance valid length. Acquire another block only
-when the current one is filled and more frame bytes are needed. At most one
-provisional block is available to the next read; EOF/error releases any unused
-block, and Interrupted retries without allocating another. This fixed-granularity
-allowance, including the initial block before the first body byte, is charged to
-B; a bogus large P cannot cause multiple blocks to be allocated speculatively.
-Logical packet growth follows actual arrivals, with at most one block of slack.
+Copy pending bytes into final pooled blocks. A fully buffered body is copied even
+when cutoff=0. A body strictly smaller than **4 KiB by default** may refill this
+buffer and copy (kernel-to-read-ahead plus read-ahead-to-pool: two copies, an
+owner-approved exception). Body size means P minus the 24-byte primary header,
+including secondary/trailer. The default is conservative: 4 KiB was the largest
+measured winning frame size, while 64 KiB lost in both reference runs. A 4 KiB
+body cutoff covers those 4 KiB frames and avoids extrapolating to unmeasured
+intermediate sizes. It remains caller-configurable; it is not a claimed optimum.
 
-Reuse blocks **and packet/segment descriptors**: after the bounded pool and
-metadata are warmed, the successful hot path has **zero per-packet allocations**.
-Consumers borrow DATA/frame slices or spans from the packet owner; do not clone
-payload vectors to hand them off. Borrow lifetimes prevent reuse while a view
-is live; moving packet ownership to workers does not copy its payload.
-Trimming a rare large record can make later growth a cold path again; do not
-claim allocation-free first use or arbitrary sustained large-record churn.
+For larger bodies, drain the pending prefix, then read directly into remaining
+frame/block space. The prefix takes the allowed second copy; only the unbuffered
+remainder has one kernel-to-user copy. Decide once for the **entire body**, so a
+short source read or a 4-byte final fragment cannot trigger a small-body refill.
+No normal read exceeds frame/block bounds when bypassing read-ahead. Read-ahead
+may cross frame boundaries, but logical offsets, recovery displacements and valid
+length advance only on consumption. Source cursor restoration bookmarks the
+physical cursor and preserves pending read-ahead through probes.
 
-L2-HOT-008 refines L2-IO-002@whole-0.2 without changing its approved wording.
-The source adapter must actually support direct reads; an externally supplied
-Read may hide buffering/copies. No one-copy claim is made for such an adapter or
-UDP reassembly outside core. In L2-IO-002's whole-packet scope, buffering means
-final pooled storage and fixed scratch means framing/control/drain scratch,
-not a second body staging buffer. This does not alter 0.1 bounded capture.
-Small direct file reads may increase syscall overhead relative to buffered 0.1;
-benchmark calls, small-packet throughput and large-body bandwidth separately.
-The copy/allocation contract is mandatory, not a guaranteed speedup.
+Buffer capacity is configurable, at least 24 bytes and target/B-representable;
+cutoff=0 disables size-triggered refills but still drains buffered bytes. One
+24-byte buffer plus cutoff=0 is the benchmark's direct-body baseline. Neither
+configuration is derived from P. One budgeted initialized pool block at most is
+provisioned for the next read; additional blocks follow actual arrivals. Retry
+Interrupted without another allocation. No incomplete frame is dispatched.
+
+Reuse blocks and packet/segment descriptors; the successful warm path allocates
+zero per packet. Consumers borrow DATA/frame spans and move owners to workers.
+A stable-source identity/size/revision snapshot precedes **any** read-ahead and
+is compared during admission and after body consumption; observed changes are
+SourceChanged. Exact EOF keeps Unconfirmed(ExactEof); known-short input uses its
+fixed-scratch truncation drain. This cannot detect undetectable same-size writes
+excluded by the adapter contract. Read+Seek alone remains insufficient.
+
+L2-HOT-008 now refines L2-IO-002@whole-0.2 with this approved copy exception.
+The 0.1 input/capture path is unchanged. External Read adapters can add buffering;
+core makes no one-copy claim for arbitrary wrappers. The benchmark now compares
+actual hybrid policy to the same implementation configured for direct bodies,
+not the former external buffered-copy prototype. Measurements are informational.
 
 A naive Vec::try_reserve(delta) is insufficient: growth may be geometric and a
 moving reallocation can transiently retain old and new allocations. Even
@@ -355,7 +362,7 @@ No settings, overcommit policy or process limits are changed by this design.
 | Control | Oracle / falsifying regression |
 | --- | --- |
 | L3-BLOCK-008 | Maintainer-derived, coordinator-confirmed default block size is 524,288 bytes including all headers/trailer. Independent frames at small P and exactly P = 524,288, with/without secondary headers and each trailer width, occupy one block and expose their exact full bytes as one contiguous borrowed slice. An admitted P = 524,292 uses two blocks; maximum setup uses 256. No automatic coalescing. |
-| L3-HOT-008 | Instrument Read destinations to prove every normal body read targets the final pool block at its frame offset, never scratch/BufReader; short/Interrupted reads preserve this and never overread the frame. After pool/descriptor warm-up, allocation counting over many mixed ordinary packet sizes is zero (oracle storage preallocated). Four-worker bursts swing from 16 live ordinary blocks to zero and back: ordinary returns retain all 16, and subsequent bursts allocate zero; large-return/pressure trim remains separately tested. Borrow/lifetime checks reject owner reuse while views live. Cold EOF has at most one budgeted provisional block and no speculative P-sized request. |
+| L3-HOT-008 | Instrument Read destinations/call sizes for the single budgeted read-ahead buffer, fully buffered bodies and strict cutoff boundaries, and direct large remainders including a tiny final block. Verify exact bytes/offsets with pending headers, recovery, short/Interrupted reads and seek probes; no large-body refill caused by a short read/final fragment. Constructor buffer accounting/failure and prefetch-time SourceChanged are typed. After pool/descriptor warm-up, allocation counting over mixed ordinary sizes is zero (oracles outside measurement). Four-worker bursts retain 16 live-to-idle blocks and allocate zero after warm-up; large-return/pressure trim remains separate. Borrow lifetimes prevent reuse while views live. Cold EOF has at most one budgeted provisional block plus fixed read-ahead, never a P-sized request. |
 | L3-DEFAULT-008 | Whole-packet new()/Default H = 134,217,728, B = 268,435,456 and shared idle N = 8 (4 MiB). Construction allocates/pre-touches zero payload blocks; demand-only warm-up does not fill to N. After large-return/pressure trim, at most eight idle blocks remain across readers/slots; ordinary returns can retain a larger warmed working set within B, and pressure may retain fewer. Independent H/B overrides preserve the other setting; defaults do not allocate H/B or alter 0.1 ReaderLimits. Feasibility still includes workspace/pool. |
 | L3-EOF-008 | Stable exact EOF admitted with precisely Unconfirmed(ExactEof), whole bytes and no next-header/stream-opt-in requirement; one byte short takes truncation-only path; identity replacement or size mutation before admission/after body returns SourceChanged with no packet. Missing stability evidence cannot authorize ExactEof. |
 | L3-LEGACY-008 | Default off: channel0/type01 selects setup S, nonzero/type01 retains ordinary S. Explicit opt-in selects setup S on nonzero/type01 and records LegacySetupAnyChannel evidence. Other types, arbitrary Data Type Versions and guessed editions never enable it. H/B overrides still apply. |
@@ -405,11 +412,7 @@ reader/buffer workspace is charged to B and frozen during an active assembly.
 Coalescing, opt-in drain/chunk modes and broader resource/performance qualification
 remain later slices; no requirement or default has been relaxed.
 
-Slice-3 review clarification: recovery alone may read fixed 8 KiB scratch chunks
-and copy the bounded bytes prefetched after a recovered primary header into final
-storage. Subsequent normal body reads are direct. The scratch is fallibly reserved
-and charged to B once at construction; logical offsets/caps count consumption,
-not prefetch. Probes restore the physical cursor while preserving pending scratch.
-The normal direct-read quantum K is one block (512 KiB), bounded by block/frame
-remainders; only known-short truncation draining uses 4 KiB scratch. No normal
-body staging or packet-sized reservation is introduced.
+The prior slice-3 8 KiB recovery-only scratch/direct-body strategy is superseded
+by the 2026-11-26 owner-approved hybrid above. Probe/cursor, typed completion,
+zero-allocation and memory limits are preserved. See
+[hybrid verification](verification-v02-hybrid.md) for current evidence.

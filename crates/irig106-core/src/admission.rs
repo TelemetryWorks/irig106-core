@@ -3,6 +3,10 @@ use crate::{Header, PacketRanges};
 use std::io::{self, Read, Seek, SeekFrom};
 /// Built-in hard ceiling, in complete-frame bytes.
 pub const DEFAULT_HARD_LIMIT: u32 = 134_217_728;
+/// Default fixed whole-mode read-ahead capacity, charged to B.
+pub const DEFAULT_READ_AHEAD_BYTES: usize = 65_536;
+/// Default strict body-size cutoff for refilling through read-ahead.
+pub const DEFAULT_SMALL_BODY_CUTOFF: usize = 4096;
 /// Explicit edition policy; never inferred from data-type versions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -21,6 +25,8 @@ pub struct WholePolicy {
     pub(crate) legacy: bool,
     pub(crate) stream: bool,
     pub(crate) recovery: Option<u64>,
+    pub(crate) read_ahead: usize,
+    pub(crate) small_body: usize,
 }
 impl Default for WholePolicy {
     fn default() -> Self {
@@ -36,6 +42,8 @@ impl WholePolicy {
             legacy: false,
             stream: false,
             recovery: None,
+            read_ahead: DEFAULT_READ_AHEAD_BYTES,
+            small_body: DEFAULT_SMALL_BODY_CUTOFF,
         }
     }
     /// Override absolute total-frame H; soft allowances never override it.
@@ -62,6 +70,27 @@ impl WholePolicy {
     pub const fn with_recovery_bytes(mut self, bytes: Option<u64>) -> Self {
         self.recovery = bytes;
         self
+    }
+    /// Set fixed read-ahead bytes (at least 24, target-representable, within B).
+    /// Never derived from a packet length. Construction reserves it fallibly.
+    pub const fn with_read_ahead_bytes(mut self, bytes: usize) -> Self {
+        self.read_ahead = bytes;
+        self
+    }
+    /// Copy/refill bodies strictly smaller than this many bytes after the primary
+    /// header (including secondary/trailer). Zero disables size-triggered copies;
+    /// already fully buffered bodies are still copied.
+    pub const fn with_small_body_cutoff(mut self, bytes: usize) -> Self {
+        self.small_body = bytes;
+        self
+    }
+    /// Configured fixed read-ahead capacity.
+    pub const fn read_ahead_bytes(&self) -> usize {
+        self.read_ahead
+    }
+    /// Configured strict body-size cutoff.
+    pub const fn small_body_cutoff(&self) -> usize {
+        self.small_body
     }
     /// Configured absolute frame ceiling.
     pub const fn hard_limit(&self) -> u32 {

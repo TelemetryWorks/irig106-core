@@ -124,9 +124,8 @@ pub enum Event {
         recovery: Option<Recovery>,
     },
 }
-pub(crate) const RECOVERY_BYTES: usize = 8192;
 #[derive(Debug)]
-struct RecoveryScratch {
+struct ReadAhead {
     bytes: Vec<u8>,
     used: usize,
     available: usize,
@@ -139,7 +138,7 @@ struct RecoveryScratch {
 #[derive(Debug)]
 pub struct PacketReader<R> {
     input: BufReader<R>,
-    scratch: Option<RecoveryScratch>,
+    scratch: Option<ReadAhead>,
     limits: ReaderLimits,
     pub(crate) position: u64,
     pub(crate) established: bool,
@@ -166,16 +165,23 @@ impl<R: Read> PacketReader<R> {
             recovery: None,
         })
     }
-    pub(crate) fn direct(input: R, recovery_bytes: Option<u64>) -> Result<Self, PoolError> {
+    pub(crate) fn whole(
+        input: R,
+        recovery_bytes: Option<u64>,
+        read_ahead: usize,
+    ) -> Result<Self, PoolError> {
+        if !(24..=isize::MAX as usize).contains(&read_ahead) {
+            return Err(PoolError::InvalidRequest);
+        }
         let mut bytes = Vec::new();
-        bytes.try_reserve_exact(RECOVERY_BYTES)?;
-        if bytes.capacity() != RECOVERY_BYTES {
+        bytes.try_reserve_exact(read_ahead)?;
+        if bytes.capacity() != read_ahead {
             return Err(PoolError::UnexpectedCapacity);
         }
-        bytes.resize(RECOVERY_BYTES, 0);
+        bytes.resize(read_ahead, 0);
         Ok(Self {
             input: BufReader::with_capacity(0, input),
-            scratch: Some(RecoveryScratch {
+            scratch: Some(ReadAhead {
                 bytes,
                 used: 0,
                 available: 0,
@@ -187,28 +193,22 @@ impl<R: Read> PacketReader<R> {
             recovery: None,
         })
     }
-    // Recovery alone prefetches a fixed chunk. Logical position/scanned counts
-    // advance only on consumption, not on this bounded source read-ahead.
-    fn recovery_byte(&mut self, out: &mut [u8]) -> Result<usize, ErrorKind> {
-        if let Some(scratch) = &mut self.scratch {
-            if scratch.used == scratch.available {
-                loop {
-                    match self.input.read(&mut scratch.bytes) {
-                        Ok(n) => {
-                            scratch.used = 0;
-                            scratch.available = n;
-                            if n == 0 {
-                                return Ok(0);
-                            }
-                            break;
-                        }
-                        Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                        Err(e) => return Err(e.into()),
-                    }
+    pub(crate) fn buffered(&self) -> usize {
+        self.scratch.as_ref().map_or(0, |b| b.available - b.used)
+    }
+    fn refill(&mut self) -> Result<usize, ErrorKind> {
+        let scratch = self.scratch.as_mut().unwrap();
+        loop {
+            match self.input.read(&mut scratch.bytes) {
+                Ok(n) => {
+                    scratch.used = 0;
+                    scratch.available = n;
+                    return Ok(n);
                 }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e.into()),
             }
         }
-        self.read_counted(out)
     }
     pub(crate) fn source(&mut self) -> &mut R {
         self.input.get_mut()
@@ -229,6 +229,16 @@ impl<R: Read> PacketReader<R> {
         Ok(())
     }
     pub(crate) fn read_counted(&mut self, out: &mut [u8]) -> Result<usize, ErrorKind> {
+        self.read_with(out, true)
+    }
+    pub(crate) fn read_body_counted(
+        &mut self,
+        out: &mut [u8],
+        copy_body: bool,
+    ) -> Result<usize, ErrorKind> {
+        self.read_with(out, copy_body)
+    }
+    fn read_with(&mut self, out: &mut [u8], prefetch: bool) -> Result<usize, ErrorKind> {
         let mut total = 0;
         while total < out.len() {
             let buffered = if let Some(scratch) = &mut self.scratch {
@@ -240,12 +250,18 @@ impl<R: Read> PacketReader<R> {
             } else {
                 0
             };
-            let result = if buffered > 0 {
-                Ok(buffered)
-            } else {
-                self.input.read(&mut out[total..])
-            };
-            match result {
+            if buffered > 0 {
+                self.advance(buffered)?;
+                total += buffered;
+                continue;
+            }
+            if prefetch && self.scratch.is_some() {
+                if self.refill()? == 0 {
+                    break;
+                }
+                continue;
+            }
+            match self.input.read(&mut out[total..]) {
                 Ok(0) => break,
                 Ok(n) => {
                     self.advance(n)?;
@@ -350,7 +366,7 @@ impl<R: Read> PacketReader<R> {
                 }
             }
             b.copy_within(1.., 0);
-            if self.recovery_byte(&mut b[23..])? == 0 {
+            if self.read_counted(&mut b[23..])? == 0 {
                 return self
                     .tail(start, TailKind::Unsynchronized)
                     .map(FrameStart::End);

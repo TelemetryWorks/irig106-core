@@ -2,7 +2,7 @@
 use crate::{
     admission::{probe, seek_retry},
     pool::Workspace,
-    reader::{FrameStart, RECOVERY_BYTES},
+    reader::FrameStart,
     *,
 };
 use std::{
@@ -135,8 +135,9 @@ pub enum WholeEvent {
 struct SourceOps<R> {
     stamp: fn(&mut R) -> io::Result<SourceStamp>,
     probe: fn(&mut R, u64) -> io::Result<bool>,
+    origin: SourceStamp,
 }
-/// Ordered whole-packet reader with one shared assembly lease and direct body reads.
+/// Ordered whole-packet reader with budgeted hybrid read-ahead and pooled bodies.
 /// Source starts at offset zero. No fallback to capture/drain/chunk delivery.
 /// Errors/tails are terminal. Wait deadlines do not interrupt arbitrary blocking Read.
 pub struct WholePacketReader<R> {
@@ -149,27 +150,46 @@ pub struct WholePacketReader<R> {
 impl<R: Read> WholePacketReader<R> {
     /// Non-seekable input. Oversoft packets require explicit policy stream opt-in.
     pub fn stream(input: R, policy: WholePolicy, pool: BlockPool) -> Result<Self, Error> {
-        let workspace = pool
-            .workspace(mem::size_of::<Self>() + QUANTUM + RECOVERY_BYTES + 512)
-            .map_err(|source| Error {
-                reason: ErrorKind::Pool { source },
+        if !(24..=isize::MAX as usize).contains(&policy.read_ahead) {
+            return Err(Error {
+                reason: ErrorKind::Pool {
+                    source: PoolError::InvalidRequest,
+                },
+                position: 0,
+                recovery: None,
+            });
+        }
+        let bytes = policy
+            .read_ahead
+            .checked_add(mem::size_of::<Self>() + QUANTUM + 512)
+            .ok_or(Error {
+                reason: ErrorKind::Pool {
+                    source: PoolError::InvalidRequest,
+                },
                 position: 0,
                 recovery: None,
             })?;
+        let workspace = pool.workspace(bytes).map_err(|source| Error {
+            reason: ErrorKind::Pool { source },
+            position: 0,
+            recovery: None,
+        })?;
         Ok(Self {
-            framing: PacketReader::direct(input, policy.recovery).map_err(|source| Error {
-                reason: ErrorKind::Pool { source },
-                position: 0,
-                recovery: None,
-            })?,
+            framing: PacketReader::whole(input, policy.recovery, policy.read_ahead).map_err(
+                |source| Error {
+                    reason: ErrorKind::Pool { source },
+                    position: 0,
+                    recovery: None,
+                },
+            )?,
             policy,
             pool,
             source: None,
             _workspace: workspace,
         })
     }
-    /// Return the exclusive source, discarding any recovery scratch read-ahead.
-    /// Its physical cursor may be ahead of position() by up to 8 KiB.
+    /// Return the exclusive source, discarding pending read-ahead.
+    /// Its physical cursor may be ahead of position() by the configured buffer size.
     pub fn into_inner(self) -> R {
         self.framing.into_inner()
     }
@@ -226,11 +246,15 @@ impl<R: Read> WholePacketReader<R> {
         }
     }
     fn stamp(&mut self) -> Result<Option<SourceStamp>, ErrorKind> {
-        self.source
-            .as_ref()
-            .map(|ops| (ops.stamp)(self.framing.source()))
-            .transpose()
-            .map_err(Into::into)
+        if let Some(ops) = &self.source {
+            let stamp = (ops.stamp)(self.framing.source())?;
+            if stamp != ops.origin {
+                return Err(AdmissionError::SourceChanged.into());
+            }
+            Ok(Some(stamp))
+        } else {
+            Ok(None)
+        }
     }
     fn unchanged(&mut self, before: Option<SourceStamp>) -> Result<(), ErrorKind> {
         if self.stamp()? != before || before.is_some_and(|stamp| self.framing.position > stamp.size)
@@ -309,6 +333,9 @@ impl<R: Read> WholePacketReader<R> {
         }
         // Rechecks feasibility after any intervening constructor; one build per B.
         let mut assembly = self.pool.begin_until(count, deadline)?;
+        // Choose once for the entire body, not a short read or final fragment.
+        let body = length - 24;
+        let copy_body = body < self.policy.small_body || self.framing.buffered() >= body;
         let mut received = 24;
         while buf.blocks.len() < count {
             let block = assembly.next_block_until(deadline)?;
@@ -326,9 +353,10 @@ impl<R: Read> WholePacketReader<R> {
             };
             while filled < valid {
                 let wanted = valid - filled;
-                let n = self
-                    .framing
-                    .read_counted(&mut block.storage_mut()[filled..filled + wanted])?;
+                let n = self.framing.read_body_counted(
+                    &mut block.storage_mut()[filled..filled + wanted],
+                    copy_body,
+                )?;
                 filled += n;
                 received += n;
                 if n < wanted {
@@ -376,9 +404,19 @@ impl<R: StableSource> WholePacketReader<R> {
             });
         }
         let mut reader = Self::stream(input, policy, pool)?;
+        let origin = reader
+            .framing
+            .source()
+            .source_stamp()
+            .map_err(|source| Error {
+                reason: ErrorKind::Io { source },
+                position: 0,
+                recovery: None,
+            })?;
         reader.source = Some(SourceOps {
             stamp: R::source_stamp,
             probe: probe::<R>,
+            origin,
         });
         Ok(reader)
     }
