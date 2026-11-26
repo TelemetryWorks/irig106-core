@@ -308,3 +308,26 @@ Pending bytes are consumed first, including at straddling headers. Small-body
 and recovery refills still use full capacity. Body-copy selection, allocation,
 limits and public policy defaults are unchanged. See
 [adaptive-refill evidence](verification-v02-adaptive.md).
+
+### Unreleased whole-packet inventory (0.2 slice 5)
+
+`Inspection::observe_packet_info(buf.info().unwrap())` accepts a complete whole
+packet's metadata and returns the same `SequenceObservation` as the capture-event
+API, without copying or converting its payload. Feed each frame exactly once on
+the ordered reader path, before dispatching its owning PacketBuf to a worker.
+Do not also feed a capture event for that frame. Workers borrow frame/DATA spans
+and return the owning buffer for reuse; inspection never retains those borrows.
+
+Call `mark_incomplete()` on a whole-reader tail, error or early stop; call
+`finish()` only after clean EOF. Entry-limit failures preserve prior counts and
+stop subsequent observation. Recovery remains sticky for unseen presence facts,
+and sequence uncertainty includes skips attached to other channels' packets.
+
+Inspection keeps its existing caller-set channel/row entry limits, independently
+of input pool B. Its BTreeMaps allocate on first-seen entries; those consumer
+output allocations are not charged to B. Once entries and input buffers are
+warmed, repeated metadata observation and ordinary buffer reuse allocate zero in
+the scoped test. This is not a claim about arbitrary worker/channel allocations.
+Ordinary returns retain the warmed high-water storage; a rare large return or
+explicit pressure trim can require re-warm before that guarantee resumes. See
+[slice-5 evidence](verification-v02-s05.md).

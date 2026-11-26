@@ -1609,3 +1609,177 @@ fn adaptive_limited_header_does_not_limit_recovery_refills() {
         assert!(requests[2..].iter().all(|(_, n)| *n == 65_536));
     });
 }
+
+#[test]
+fn previous_large_includes_body_exactly_at_cutoff() {
+    watchdog(Duration::from_secs(5), || {
+        let pool = BlockPool::with_defaults().unwrap();
+        let mut buf = PacketBuf::new(pool.clone()).unwrap();
+        let mut bytes = frame(4120, 0, 9, 0);
+        bytes.extend(frame(28, 0, 9, 0));
+        let input = BoundaryProbe {
+            input: Cursor::new(bytes),
+            requests: Vec::with_capacity(4),
+            short_at: Some((0, 4120)),
+        };
+        let mut r = WholePacketReader::stream(input, WholePolicy::new(), pool).unwrap();
+        r.next_packet_into(&mut buf, deadline()).unwrap();
+        r.next_packet_into(&mut buf, deadline()).unwrap();
+        assert_eq!(r.into_inner().requests[1], (4120, 24));
+    });
+}
+
+#[test]
+fn whole_reader_workers_reuse_buffers_and_inspect_without_warm_allocations() {
+    watchdog(Duration::from_secs(15), || {
+        use std::{sync::mpsc::sync_channel, thread};
+        fn counted<T>(f: impl FnOnce() -> T) -> (T, usize) {
+            ALLOCATIONS.with(|c| {
+                assert!(c.get().is_none());
+                c.set(Some(0));
+            });
+            let value = f();
+            let count = ALLOCATIONS.with(|c| c.replace(None).unwrap());
+            (value, count)
+        }
+        fn small(index: usize) -> Vec<u8> {
+            let mut b = frame(28, 1, 9, 0);
+            b[13] = 254u8.wrapping_add(index as u8);
+            let sum = b[..22].chunks_exact(2).fold(0u16, |s, w| {
+                s.wrapping_add(u16::from_le_bytes([w[0], w[1]]))
+            });
+            b[22..24].copy_from_slice(&sum.to_le_bytes());
+            b
+        }
+        let mut bytes = Vec::new();
+        for i in 0..48 {
+            bytes.extend(small(i));
+        }
+        bytes.extend(frame((9 * BLOCK_BYTES) as u32, 0, 1, 0));
+        for i in 48..80 {
+            bytes.extend(small(i));
+        }
+        let pool = BlockPool::with_defaults().unwrap();
+        let mut available = Vec::with_capacity(16);
+        for _ in 0..16 {
+            available.push(PacketBuf::new(pool.clone()).unwrap());
+        }
+        let mut reader =
+            WholePacketReader::stream(Cursor::new(bytes), WholePolicy::new(), pool.clone())
+                .unwrap();
+        let mut inventory = Inspection::new(InspectionLimits::new(2, 2));
+        let (returned, returns) = sync_channel(16);
+        let mut inputs = Vec::new();
+        let mut releases = Vec::new();
+        let mut workers = Vec::new();
+        for _ in 0..4 {
+            let (send, receive) = sync_channel::<PacketBuf>(4);
+            let (release, go) = sync_channel(1);
+            inputs.push(send);
+            releases.push(release);
+            let returned = returned.clone();
+            workers.push(thread::spawn(move || {
+                for _ in 0..5 {
+                    let buffers: [PacketBuf; 4] = std::array::from_fn(|_| {
+                        receive.recv_timeout(Duration::from_secs(5)).unwrap()
+                    });
+                    go.recv_timeout(Duration::from_secs(5)).unwrap();
+                    for mut buffer in buffers {
+                        let (_, allocations) = counted(|| {
+                            assert!(buffer.data_spans().flatten().all(|&b| b == 0x5a));
+                            buffer.clear();
+                        });
+                        returned.send((buffer, allocations)).unwrap();
+                    }
+                }
+            }));
+        }
+        let mut small_index = 0;
+        let mut measured_allocations = 0;
+        for round in 0..5 {
+            if round == 3 {
+                let mut buffer = available.pop().unwrap();
+                reader.next_packet_into(&mut buffer, deadline()).unwrap();
+                inventory
+                    .observe_packet_info(buffer.info().unwrap())
+                    .unwrap();
+                assert_eq!(buffer.frame_spans().count(), 9);
+                buffer.clear();
+                available.push(buffer);
+                assert_eq!(pool.stats().unwrap().idle_blocks, 8);
+            }
+            let measure = matches!(round, 1 | 2 | 4);
+            for index in 0..16 {
+                let mut buffer = available.pop().unwrap();
+                let (observation, allocations) = counted(|| {
+                    assert!(matches!(
+                        reader.next_packet_into(&mut buffer, deadline()).unwrap(),
+                        Some(WholeEvent::Packet)
+                    ));
+                    inventory
+                        .observe_packet_info(buffer.info().unwrap())
+                        .unwrap()
+                });
+                assert_eq!(
+                    observation.kind(),
+                    if small_index == 0 {
+                        SequenceKind::First
+                    } else {
+                        SequenceKind::Contiguous
+                    }
+                );
+                small_index += 1;
+                if measure {
+                    measured_allocations += allocations;
+                }
+                inputs[index % 4].send(buffer).unwrap();
+            }
+            let held = pool.stats().unwrap();
+            assert_eq!((held.allocated_blocks, held.idle_blocks), (16, 0));
+            assert!(held.used_bytes <= DEFAULT_POOL_BUDGET);
+            for release in &releases {
+                release.send(()).unwrap();
+            }
+            for _ in 0..16 {
+                let (buffer, allocations) = returns.recv_timeout(Duration::from_secs(5)).unwrap();
+                if measure {
+                    measured_allocations += allocations;
+                }
+                available.push(buffer);
+            }
+            assert_eq!(pool.stats().unwrap().idle_blocks, 16);
+            assert_eq!(
+                pool.stats().unwrap().block_allocations,
+                if round < 3 { 16 } else { 24 }
+            );
+        }
+        assert_eq!(measured_allocations, 0);
+        for worker in workers {
+            let until = Instant::now() + Duration::from_secs(5);
+            while !worker.is_finished() {
+                assert!(Instant::now() < until);
+                thread::yield_now();
+            }
+            worker.join().unwrap();
+        }
+        assert!(
+            reader
+                .next_packet_into(&mut available[0], deadline())
+                .unwrap()
+                .is_none()
+        );
+        inventory.finish();
+        assert_eq!(inventory.status(), ScanStatus::Complete);
+        assert_eq!(
+            (
+                inventory.totals().packets,
+                inventory.totals().data_bytes,
+                inventory.totals().packet_bytes
+            ),
+            (81, 324, 80 * 28 + 9 * BLOCK_BYTES as u64)
+        );
+        assert_eq!(inventory.presence().setup_record, Presence::Present);
+        assert_eq!(inventory.presence().recording_index, Presence::Absent);
+        assert_eq!(inventory.presence().recording_events, Presence::Absent);
+    });
+}

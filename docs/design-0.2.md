@@ -431,3 +431,24 @@ The prior slice-3 8 KiB recovery-only scratch/direct-body strategy is superseded
 by the 2026-11-26 owner-approved hybrid above. Probe/cursor, typed completion,
 zero-allocation and memory limits are preserved. See
 [hybrid verification](verification-v02-hybrid.md) for current evidence.
+
+
+## Slice 5 integration boundary
+
+Pool reuse/trim was implemented with the storage and whole-packet slices; this
+slice adds the metadata-only inspection bridge and end-to-end worker evidence.
+Observe accepted PacketInfo once on the ordered path before moving PacketBuf
+ownership to workers. Existing inspection entry limits, terminal status, recovery
+uncertainty and per-channel sequence rules are shared with capture mode. Consumer
+inventory maps remain separately entry-bounded, not charged to the input pool B.
+
+The worker test covers 16 retained ordinary buffers, a nine-block setup return
+that trims idle storage to eight, and zero-allocation bursts after re-warm. It
+pins the agreed hysteresis without changing it. The exact-cutoff refill boundary
+is also pinned; no geometric refill strategy is introduced. See
+[slice-5 evidence](verification-v02-s05.md).
+
+Next is slice 6's ordered consumer examples/optional streaming contract, then
+slice 7's resource/platform/performance qualification. Explicit coalescing and
+opt-in drain/chunk delivery remain unimplemented; this metadata bridge does not
+claim those obligations or full 0.2 qualification.
