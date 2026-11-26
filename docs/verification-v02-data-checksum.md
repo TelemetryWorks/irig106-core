@@ -57,3 +57,25 @@ Verified, omit later blocks, omit width masking, misroute mismatch counter and
 drop partial-word carry. All mutations were discarded. Exact-head CI run IDs
 and benchmark table are recorded in the PR.
 No merge, version bump, tag or publication is authorized.
+
+
+## Owner performance follow-up
+
+The original scalar reduction costs are superseded by the optimized exact-head
+benchmark in the PR. Tried widened u64 word lanes and packed widened lanes;
+the selected safe-std kernel processes 64-byte groups with independent modular
+lanes and a u64 horizontal reduction. No dependencies, unsafe code, CPU-specific
+intrinsics, target-cpu flags, I/O changes or altered benchmark baseline.
+For width w, sum_i(sum_j(x_ij) mod 2^w) mod 2^w equals sum_ij(x_ij) mod 2^w.
+Thus native-width lane wrapping is exact, avoids widening every byte/word, and
+allows LLVM to emit wide vector loads/adds. The existing four-byte carry still
+handles incomplete words; scalar cleanup visits only the last <64 bytes.
+Inspected aarch64 release assembly contains paired vector loads plus add .16b,
+.8h and .4s. Auto-vectorization is compiler/target-dependent, not a wire contract.
+
+A reproducible xorshift differential test covers 900 cases across all widths:
+naive weighted-byte oracle, random data/span splits, offsets 0..31, empty updates,
+short/odd tails and block-sized input. All-FF 1 MiB single spans exercise lane
+wraparound and wide reductions. Existing independent literal/oracle tests remain.
+The requested <10% cost at 64/512 KiB is a measurement target, not a claimed
+result: current exact-head numbers and any remaining gap are reported in the PR.

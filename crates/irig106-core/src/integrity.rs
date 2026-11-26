@@ -132,7 +132,7 @@ impl PacketRanges {
 // payloads or a second traversal of an assembled packet.
 pub(crate) struct DataChecksum {
     width: usize,
-    sum: u32,
+    sum: u64,
     pending: [u8; 4],
     used: usize,
 }
@@ -154,22 +154,19 @@ impl DataChecksum {
             if self.used < self.width {
                 return;
             }
-            self.sum = self.sum.wrapping_add(u32::from_le_bytes(self.pending));
+            self.sum = self
+                .sum
+                .wrapping_add(u64::from(u32::from_le_bytes(self.pending)));
             self.pending = [0; 4];
             self.used = 0;
         }
-        self.sum = match self.width {
-            1 => bytes
-                .iter()
-                .fold(self.sum, |s, &b| s.wrapping_add(u32::from(b))),
-            2 => bytes.chunks_exact(2).fold(self.sum, |s, w| {
-                s.wrapping_add(u32::from(u16::from_le_bytes([w[0], w[1]])))
-            }),
-            4 => bytes.chunks_exact(4).fold(self.sum, |s, w| {
-                s.wrapping_add(u32::from_le_bytes(w.try_into().unwrap()))
-            }),
+        let sum = match self.width {
+            1 => byte_sum(bytes),
+            2 => word_sum(bytes),
+            4 => longword_sum(bytes),
             _ => unreachable!(),
         };
+        self.sum = self.sum.wrapping_add(sum);
         let remainder = bytes.len() % self.width;
         self.pending[..remainder].copy_from_slice(&bytes[bytes.len() - remainder..]);
         self.used = remainder;
@@ -180,7 +177,7 @@ impl DataChecksum {
         let mut raw = [0; 4];
         raw[..self.width].copy_from_slice(stored);
         let stored = u32::from_le_bytes(raw);
-        let computed = self.sum & (u32::MAX >> (32 - self.width * 8));
+        let computed = (self.sum & (u64::MAX >> (64 - self.width * 8))) as u32;
         if stored == computed {
             DataChecksumState::Verified {
                 width: self.width as u8,
@@ -195,9 +192,99 @@ impl DataChecksum {
         }
     }
 }
+// Independent modular lanes over 64-byte groups avoid widening every input
+// element. Each lane is congruent to its mathematical wide sum modulo the
+// selected width; the final horizontal reduction therefore has the same low
+// bits. Fixed lane counts allow LLVM to use vector loads/adds. Byte decoding is
+// alignment-independent; partial checksum words remain in update's fixed carry.
+macro_rules! lane_sum {
+    ($name:ident, $word:ty, $width:expr) => {
+        fn $name(bytes: &[u8]) -> u64 {
+            let mut lanes = [0 as $word; 64 / $width];
+            let mut groups = bytes.chunks_exact(64);
+            for group in &mut groups {
+                for (lane, word) in lanes.iter_mut().zip(group.chunks_exact($width)) {
+                    *lane = lane.wrapping_add(<$word>::from_le_bytes(word.try_into().unwrap()));
+                }
+            }
+            let mut sum = lanes
+                .into_iter()
+                .fold(0u64, |s, v| s.wrapping_add(u64::from(v)));
+            for word in groups.remainder().chunks_exact($width) {
+                sum = sum.wrapping_add(u64::from(<$word>::from_le_bytes(word.try_into().unwrap())));
+            }
+            sum
+        }
+    };
+}
+lane_sum!(byte_sum, u8, 1);
+lane_sum!(word_sum, u16, 2);
+lane_sum!(longword_sum, u32, 4);
 #[cfg(test)]
 mod data_checksum_tests {
     use super::*;
+    #[test]
+    fn randomized_differential_over_unaligned_spans_and_odd_tails() {
+        fn random(state: &mut u64) -> u64 {
+            *state ^= *state << 13;
+            *state ^= *state >> 7;
+            *state ^= *state << 17;
+            *state
+        }
+        let mut seed = 0x1062_0240_0c5e_cafe;
+        for width in [1, 2, 4] {
+            for case in 0..300 {
+                let length = match case % 5 {
+                    0 => case,
+                    1 => 4096 + case,
+                    2 => crate::BLOCK_BYTES + case,
+                    _ => random(&mut seed) as usize % 8192,
+                } / width
+                    * width;
+                let offset = case % 32;
+                let mut storage = vec![0; length + offset];
+                for b in &mut storage {
+                    *b = if case % 11 == 0 {
+                        0xff
+                    } else {
+                        random(&mut seed) as u8
+                    };
+                }
+                let bytes = &storage[offset..];
+                // Naive weighted-byte oracle deliberately differs from word
+                // decoding, lane grouping and production carry logic.
+                let sum = bytes.iter().enumerate().fold(0u64, |s, (i, &b)| {
+                    s.wrapping_add(u64::from(b) << (8 * (i % width)))
+                });
+                let expected = (sum & (u64::MAX >> (64 - width * 8))) as u32;
+                let mut c = DataChecksum::new(width);
+                let mut at = 0;
+                while at < length {
+                    c.update(&[]);
+                    let n = (1 + random(&mut seed) as usize % (1 + case * 17)).min(length - at);
+                    c.update(&bytes[at..at + n]);
+                    at += n;
+                }
+                assert!(
+                    matches!(c.finish(&expected.to_le_bytes()[..width]),
+                    DataChecksumState::Verified{value,..} if value==expected),
+                    "case={case} width={width} length={length} offset={offset}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn maximum_lane_values_wrap_without_cross_lane_carries() {
+        for width in [1, 2, 4] {
+            let bytes = vec![0xff; 1_048_576];
+            let mut c = DataChecksum::new(width);
+            c.update(&bytes);
+            let expected =
+                (0u32.wrapping_sub((bytes.len() / width) as u32)) & (u32::MAX >> (32 - width * 8));
+            assert!(matches!(c.finish(&expected.to_le_bytes()[..width]),
+                DataChecksumState::Verified{value,..} if value==expected));
+        }
+    }
     #[test]
     fn carry_is_independent_of_arrival_boundaries() {
         // Independent literal sums: bytes 1..=12 => 78, words => 2A24,
