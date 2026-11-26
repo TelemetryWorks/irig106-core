@@ -38,3 +38,8 @@ writes. Library code remains safe/std-only; allocator instrumentation alone is
 unsafe in tests. Existing 0.1 capture checks run unchanged. Package inventory
 includes the new modules/test. Exact-head CI and publish-path dry-run IDs are
 recorded in the PR after completion.
+
+Final provenance regression: Unknown(7), channel0/type01, explicit legacy option
+earns the setup allowance only through that option and must report it as used.
+The added table case observed false instead of true before the evidence fix;
+admission itself is unchanged. Known 24R1 channel0 still needs no legacy evidence.

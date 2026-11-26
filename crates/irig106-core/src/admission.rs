@@ -117,7 +117,7 @@ pub struct AdmissionEvidence {
     pub soft_limit: u32,
     /// Whether Packet Length exceeds that threshold.
     pub over_soft: bool,
-    /// Explicit legacy policy actually extended allowance to a nonzero channel.
+    /// Explicit legacy policy supplied an allowance unavailable under the edition default.
     pub legacy_setup_any_channel: bool,
     /// Size authorization used.
     pub authorization: Authorization,
