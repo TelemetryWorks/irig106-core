@@ -355,7 +355,7 @@ No settings, overcommit policy or process limits are changed by this design.
 | Control | Oracle / falsifying regression |
 | --- | --- |
 | L3-BLOCK-008 | Maintainer-derived, coordinator-confirmed default block size is 524,288 bytes including all headers/trailer. Independent frames at small P and exactly P = 524,288, with/without secondary headers and each trailer width, occupy one block and expose their exact full bytes as one contiguous borrowed slice. An admitted P = 524,292 uses two blocks; maximum setup uses 256. No automatic coalescing. |
-| L3-HOT-008 | Instrument Read destinations to prove every body read targets the final pool block at its frame offset, never scratch/BufReader; short/Interrupted reads preserve this and never overread the frame. After pool/descriptor warm-up, allocation counting over many mixed ordinary packet sizes is zero (oracle storage preallocated). Four-worker bursts swing from 16 live ordinary blocks to zero and back: ordinary returns retain all 16, and subsequent bursts allocate zero; large-return/pressure trim remains separately tested. Borrow/lifetime checks reject owner reuse while views live. Cold EOF has at most one budgeted provisional block and no speculative P-sized request. |
+| L3-HOT-008 | Instrument Read destinations to prove every normal body read targets the final pool block at its frame offset, never scratch/BufReader; short/Interrupted reads preserve this and never overread the frame. After pool/descriptor warm-up, allocation counting over many mixed ordinary packet sizes is zero (oracle storage preallocated). Four-worker bursts swing from 16 live ordinary blocks to zero and back: ordinary returns retain all 16, and subsequent bursts allocate zero; large-return/pressure trim remains separately tested. Borrow/lifetime checks reject owner reuse while views live. Cold EOF has at most one budgeted provisional block and no speculative P-sized request. |
 | L3-DEFAULT-008 | Whole-packet new()/Default H = 134,217,728, B = 268,435,456 and shared idle N = 8 (4 MiB). Construction allocates/pre-touches zero payload blocks; demand-only warm-up does not fill to N. After large-return/pressure trim, at most eight idle blocks remain across readers/slots; ordinary returns can retain a larger warmed working set within B, and pressure may retain fewer. Independent H/B overrides preserve the other setting; defaults do not allocate H/B or alter 0.1 ReaderLimits. Feasibility still includes workspace/pool. |
 | L3-EOF-008 | Stable exact EOF admitted with precisely Unconfirmed(ExactEof), whole bytes and no next-header/stream-opt-in requirement; one byte short takes truncation-only path; identity replacement or size mutation before admission/after body returns SourceChanged with no packet. Missing stability evidence cannot authorize ExactEof. |
 | L3-LEGACY-008 | Default off: channel0/type01 selects setup S, nonzero/type01 retains ordinary S. Explicit opt-in selects setup S on nonzero/type01 and records LegacySetupAnyChannel evidence. Other types, arbitrary Data Type Versions and guessed editions never enable it. H/B overrides still apply. |
@@ -394,3 +394,22 @@ callers wanting lower residency choose a lower budget at construction or call
 trim. Process/allocator overhead remains outside the accounted block budget.
 This is the coordinator-accepted hysteresis tradeoff, not a promise of 4 MiB idle
 storage after every burst.
+
+## Slice 3 integration boundary
+
+The [slice-3 evidence](verification-v02-s03.md) describes admission/EOF checks and
+the minimal direct-read whole-frame entry path requested with this assignment.
+This also brings forward part of the planned slice-4 incremental implementation.
+The caller reuses PacketBuf descriptors and moves buffer ownership to workers;
+reader/buffer workspace is charged to B and frozen during an active assembly.
+Coalescing, opt-in drain/chunk modes and broader resource/performance qualification
+remain later slices; no requirement or default has been relaxed.
+
+Slice-3 review clarification: recovery alone may read fixed 8 KiB scratch chunks
+and copy the bounded bytes prefetched after a recovered primary header into final
+storage. Subsequent normal body reads are direct. The scratch is fallibly reserved
+and charged to B once at construction; logical offsets/caps count consumption,
+not prefetch. Probes restore the physical cursor while preserving pending scratch.
+The normal direct-read quantum K is one block (512 KiB), bounded by block/frame
+remainders; only known-short truncation draining uses 4 KiB scratch. No normal
+body staging or packet-sized reservation is introduced.

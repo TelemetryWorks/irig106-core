@@ -1,5 +1,5 @@
 //! Typed reader failures and bounded terminal evidence.
-use crate::{HeaderError, TailKind};
+use crate::{AdmissionError, HeaderError, PoolError, TailKind};
 use std::{collections::TryReserveError, error::Error as StdError, fmt, io};
 
 /// One recovery incident; the 24-byte validation window is not charged.
@@ -36,6 +36,18 @@ pub struct Tail {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ErrorKind {
+    /// Whole-packet size/stability admission failure.
+    #[non_exhaustive]
+    Admission {
+        /// Typed policy evidence.
+        source: AdmissionError,
+    },
+    /// Shared whole-packet storage failure.
+    #[non_exhaustive]
+    Pool {
+        /// Typed budget/allocation/wait cause.
+        source: PoolError,
+    },
     /// Original operational read failure.
     /// ```compile_fail,E0638
     /// use irig106_core::ErrorKind;
@@ -130,6 +142,15 @@ impl Error {
     pub fn kind(&self) -> io::ErrorKind {
         match &self.reason {
             ErrorKind::Io { source: error } => error.kind(),
+            ErrorKind::Pool { source } => match source {
+                PoolError::DeadlineExceeded => io::ErrorKind::TimedOut,
+                PoolError::WouldBlock => io::ErrorKind::WouldBlock,
+                PoolError::Cancelled | PoolError::BudgetUnavailable => io::ErrorKind::Other,
+                PoolError::BudgetTooSmall { .. } | PoolError::InvalidRequest => {
+                    io::ErrorKind::InvalidInput
+                }
+                _ => io::ErrorKind::Other,
+            },
             ErrorKind::InvalidBuffer | ErrorKind::CaptureLimit { .. } => {
                 io::ErrorKind::InvalidInput
             }
@@ -140,6 +161,8 @@ impl Error {
     /// Underlying typed header, I/O or allocation error, when present.
     pub fn get_ref(&self) -> Option<&(dyn StdError + Send + Sync + 'static)> {
         match &self.reason {
+            ErrorKind::Admission { source } => Some(source),
+            ErrorKind::Pool { source } => Some(source),
             ErrorKind::Io { source: error } => Some(error),
             ErrorKind::Header { source: error } => Some(error),
             ErrorKind::Allocation { source: error } => Some(error),
@@ -169,6 +192,8 @@ impl StdError for Error {
 impl fmt::Display for ErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Admission { source } => write!(f, "packet admission failed: {source}"),
+            Self::Pool { source } => write!(f, "packet storage failed: {source}"),
             Self::Io { source: error } => write!(f, "input read failed: {error}"),
             Self::Header { source: error } => write!(f, "invalid packet framing: {error}"),
             Self::NoCompletePacket { tail } => {
@@ -194,9 +219,36 @@ impl fmt::Display for ErrorKind {
     }
 }
 
+impl From<AdmissionError> for ErrorKind {
+    fn from(source: AdmissionError) -> Self {
+        Self::Admission { source }
+    }
+}
+impl From<PoolError> for ErrorKind {
+    fn from(source: PoolError) -> Self {
+        Self::Pool { source }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn terminal_pool_failures_do_not_request_io_retry() {
+        for (source, expected) in [
+            (PoolError::Cancelled, io::ErrorKind::Other),
+            (PoolError::BudgetUnavailable, io::ErrorKind::Other),
+            (PoolError::WouldBlock, io::ErrorKind::WouldBlock),
+            (PoolError::DeadlineExceeded, io::ErrorKind::TimedOut),
+        ] {
+            let error = Error {
+                reason: ErrorKind::Pool { source },
+                position: 24,
+                recovery: None,
+            };
+            assert_eq!(error.kind(), expected);
+        }
+    }
     #[test]
     fn every_error_reason_has_human_display() {
         for (reason, text) in [

@@ -82,6 +82,7 @@ impl From<TryReserveError> for PoolError {
 struct State {
     idle: Vec<Vec<u8>>,
     allocated: usize,
+    workspace: usize,
     assembling: bool,
     cancelled: bool,
     waiting: usize,
@@ -150,6 +151,7 @@ impl BlockPool {
                 state: Mutex::new(State {
                     idle,
                     allocated: 0,
+                    workspace: 0,
                     assembling: false,
                     cancelled: false,
                     waiting: 0,
@@ -174,7 +176,7 @@ impl BlockPool {
     ) -> Result<MutexGuard<'a, State>, PoolError> {
         // No ownership/thread inference: only absence of all possible returners
         // proves that waiting cannot help. Callers check readiness before this.
-        if !state.assembling && state.allocated == state.idle.len() {
+        if !state.assembling && state.allocated == state.idle.len() && state.workspace == 0 {
             return Err(PoolError::BudgetUnavailable);
         }
         let deadline = deadline.ok_or(PoolError::WouldBlock)?;
@@ -234,6 +236,15 @@ impl BlockPool {
             if state.cancelled {
                 return Err(PoolError::Cancelled);
             }
+            // Other constructors may commit workspace after the previous
+            // assembly releases admission, before this waiter reacquires it.
+            let needed = blocks * UNIT + self.shared.fixed + state.workspace;
+            if needed > self.shared.budget {
+                return Err(PoolError::BudgetTooSmall {
+                    needed,
+                    limit: self.shared.budget,
+                });
+            }
             if !state.assembling {
                 state.assembling = true;
                 break;
@@ -243,6 +254,64 @@ impl BlockPool {
         Ok(BlockAssembly {
             pool: self.clone(),
             remaining: blocks,
+        })
+    }
+    pub(crate) fn frame_feasible(&self, blocks: usize) -> Result<(), PoolError> {
+        if blocks == 0 {
+            return Err(PoolError::InvalidRequest);
+        }
+        let state = self.lock()?;
+        if state.cancelled {
+            return Err(PoolError::Cancelled);
+        }
+        let needed = blocks
+            .checked_mul(UNIT)
+            .and_then(|n| n.checked_add(self.shared.fixed))
+            .and_then(|n| n.checked_add(state.workspace))
+            .unwrap_or(usize::MAX);
+        if needed > self.shared.budget {
+            return Err(PoolError::BudgetTooSmall {
+                needed,
+                limit: self.shared.budget,
+            });
+        }
+        Ok(())
+    }
+    pub(crate) fn slots(&self) -> usize {
+        self.shared.max_blocks
+    }
+    pub(crate) fn same_pool(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
+    }
+    pub(crate) fn workspace(&self, bytes: usize) -> Result<Workspace, PoolError> {
+        let mut state = self.lock()?;
+        if state.cancelled {
+            return Err(PoolError::Cancelled);
+        }
+        if state.assembling {
+            return Err(PoolError::WouldBlock);
+        }
+        let unavoidable = self
+            .shared
+            .fixed
+            .checked_add(state.workspace)
+            .and_then(|n| n.checked_add(bytes))
+            .ok_or(PoolError::InvalidRequest)?;
+        if unavoidable > self.shared.budget {
+            return Err(PoolError::BudgetTooSmall {
+                needed: unavoidable,
+                limit: self.shared.budget,
+            });
+        }
+        // Construction never evicts the warmed pool implicitly. Callers can
+        // explicitly trim/release blocks and retry this nonblocking reservation.
+        if unavoidable + state.allocated * UNIT > self.shared.budget {
+            return Err(PoolError::WouldBlock);
+        }
+        state.workspace += bytes;
+        Ok(Workspace {
+            pool: self.clone(),
+            bytes,
         })
     }
     /// Trim surplus idle storage under explicit external budget pressure.
@@ -278,7 +347,7 @@ impl BlockPool {
         let state = self.lock()?;
         Ok(PoolStats {
             budget_bytes: self.shared.budget,
-            used_bytes: self.shared.fixed + state.allocated * UNIT,
+            used_bytes: self.shared.fixed + state.workspace + state.allocated * UNIT,
             allocated_blocks: state.allocated,
             idle_blocks: state.idle.len(),
             block_allocations: state.allocations,
@@ -286,6 +355,20 @@ impl BlockPool {
         })
     }
 }
+#[derive(Debug)]
+pub(crate) struct Workspace {
+    pool: BlockPool,
+    bytes: usize,
+}
+impl Drop for Workspace {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.pool.lock() {
+            state.workspace -= self.bytes;
+            self.pool.shared.changed.notify_all();
+        }
+    }
+}
+
 /// Exclusive assembly admission, released on drop, including errors/early EOF.
 /// This primitive does not yet parse or validate packets.
 #[derive(Debug)]
@@ -327,7 +410,9 @@ impl BlockAssembly {
             if let Some(bytes) = state.idle.pop() {
                 break bytes;
             }
-            if state.allocated < self.pool.shared.max_blocks {
+            if self.pool.shared.fixed + state.workspace + (state.allocated + 1) * UNIT
+                <= self.pool.shared.budget
+            {
                 state.allocated += 1; // Claim before reservation/initialization.
                 drop(state); // Cold allocation/zeroing must not block worker returns.
                 let result = allocate().and_then(|mut bytes| {
@@ -453,46 +538,91 @@ mod tests {
         pool.cancel().unwrap();
         assert_eq!(pool.stats().unwrap().used_bytes, fixed);
     }
+    fn bounded<T: Send + 'static>(operation: impl FnOnce() -> T + Send + 'static) -> T {
+        let worker = std::thread::spawn(operation);
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while !worker.is_finished() {
+            assert!(
+                Instant::now() < deadline,
+                "pool operation exceeded watchdog"
+            );
+            std::thread::yield_now();
+        }
+        worker.join().unwrap()
+    }
+    #[test]
+    fn readiness_after_wake_wins_over_expired_deadline() {
+        bounded(|| {
+            let pool = BlockPool::with_defaults().unwrap();
+            let owner = pool.try_begin(1).unwrap();
+            let deadline = Instant::now() + std::time::Duration::from_secs(1);
+            let p = pool.clone();
+            let worker = std::thread::spawn(move || p.begin_until(1, deadline));
+            let watchdog = Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                let mut state = pool.lock().unwrap();
+                if state.waiting == 1 {
+                    // Retain the mutex until expiry: even a timeout/spurious wake
+                    // cannot return the guard until readiness is already true.
+                    state.assembling = false;
+                    while Instant::now() <= deadline {
+                        std::thread::yield_now();
+                    }
+                    pool.shared.changed.notify_all();
+                    break;
+                }
+                assert!(Instant::now() < watchdog);
+                drop(state);
+                std::thread::yield_now();
+            }
+            drop(bounded(move || worker.join().unwrap().unwrap()));
+            drop(owner);
+        });
+    }
     #[test]
     fn no_returner_is_provable_only_without_outstanding_resources() {
-        let pool = BlockPool::with_defaults().unwrap();
-        // Exercise the wait boundary directly: public acquisition is ready in
-        // this state, so it never needs to wait. No owner can release anything.
-        let state = pool.lock().unwrap();
-        assert!(matches!(
-            pool.wait(state, Some(Instant::now())),
-            Err(PoolError::BudgetUnavailable)
-        ));
-        assert_eq!(pool.stats().unwrap().waiting, 0);
-        // An outstanding permit is a possible returner even on this thread.
-        let owner = pool.try_begin(1).unwrap();
-        assert!(matches!(pool.try_begin(1), Err(PoolError::WouldBlock)));
-        assert!(matches!(
-            pool.begin_until(1, Instant::now()),
-            Err(PoolError::DeadlineExceeded)
-        ));
-        drop(owner);
+        bounded(|| {
+            let pool = BlockPool::with_defaults().unwrap();
+            // Exercise the wait boundary directly: public acquisition is ready in
+            // this state, so it never needs to wait. No owner can release anything.
+            let state = pool.lock().unwrap();
+            assert!(matches!(
+                pool.wait(state, Some(Instant::now())),
+                Err(PoolError::BudgetUnavailable)
+            ));
+            assert_eq!(pool.stats().unwrap().waiting, 0);
+            // An outstanding permit is a possible returner even on this thread.
+            let owner = pool.try_begin(1).unwrap();
+            assert!(matches!(pool.try_begin(1), Err(PoolError::WouldBlock)));
+            assert!(matches!(
+                pool.begin_until(1, Instant::now()),
+                Err(PoolError::DeadlineExceeded)
+            ));
+            drop(owner);
+        });
     }
     #[test]
     fn deadlines_expire_without_cancelling_or_consuming_resources() {
-        use std::time::Duration;
-        let pool = BlockPool::new(BLOCK_BYTES + 4096).unwrap();
-        let mut owner = pool.try_begin(1).unwrap();
-        assert!(matches!(
-            pool.begin_until(1, Instant::now() + Duration::from_millis(1)),
-            Err(PoolError::DeadlineExceeded)
-        ));
-        let block = owner.try_next_block().unwrap();
-        drop(owner);
-        let mut next = pool.try_begin(1).unwrap();
-        assert!(matches!(
-            next.next_block_until(Instant::now() + Duration::from_millis(1)),
-            Err(PoolError::DeadlineExceeded)
-        ));
-        assert_eq!(pool.stats().unwrap().waiting, 0);
-        drop(block);
-        // Readiness is checked before the wait deadline; the failed attempt kept its slot.
-        drop(next.next_block_until(Instant::now()).unwrap());
+        bounded(|| {
+            use std::time::Duration;
+            let pool = BlockPool::new(BLOCK_BYTES + 4096).unwrap();
+            let mut owner = pool.try_begin(1).unwrap();
+            assert!(matches!(
+                pool.begin_until(1, Instant::now() + Duration::from_millis(1)),
+                Err(PoolError::DeadlineExceeded)
+            ));
+            let block = owner.try_next_block().unwrap();
+            drop(owner);
+            let mut next = pool.try_begin(1).unwrap();
+            assert!(matches!(
+                next.next_block_until(Instant::now() + Duration::from_millis(1)),
+                Err(PoolError::DeadlineExceeded)
+            ));
+            assert_eq!(pool.stats().unwrap().waiting, 0);
+            drop(block);
+            // Readiness is checked before the wait deadline; the failed attempt kept its slot.
+            drop(next.next_block_until(Instant::now()).unwrap());
+        });
     }
     #[test]
     fn spurious_notification_rechecks_predicate_and_cancellation() {
@@ -520,6 +650,53 @@ mod tests {
         }
         assert!(matches!(worker.join().unwrap(), Err(PoolError::Cancelled)));
         drop(owner);
+    }
+    #[test]
+    fn workspace_is_charged_released_and_cannot_break_an_active_build() {
+        let pool = BlockPool::new(BLOCK_BYTES + 4096).unwrap();
+        let before = pool.stats().unwrap().used_bytes;
+        let workspace = pool.workspace(4096).unwrap();
+        assert_eq!(pool.stats().unwrap().used_bytes, before + 4096);
+        assert!(matches!(
+            pool.try_begin(1),
+            Err(PoolError::BudgetTooSmall { .. })
+        ));
+        drop(workspace);
+        assert_eq!(pool.stats().unwrap().used_bytes, before);
+        let owner = pool.try_begin(1).unwrap();
+        assert!(matches!(pool.workspace(1), Err(PoolError::WouldBlock)));
+        drop(owner);
+    }
+    #[test]
+    fn admission_rechecks_workspace_after_wake() {
+        bounded(|| {
+            let pool = BlockPool::new(BLOCK_BYTES + 4096).unwrap();
+            let owner = pool.try_begin(1).unwrap();
+            let p = pool.clone();
+            let worker = std::thread::spawn(move || {
+                p.begin_until(1, Instant::now() + std::time::Duration::from_secs(30))
+            });
+            let watchdog = Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                let mut state = pool.lock().unwrap();
+                if state.waiting == 1 {
+                    // Simulate a constructor committing workspace in the gap
+                    // between admission release and waiter lock reacquisition.
+                    state.assembling = false;
+                    state.workspace += 4096;
+                    pool.shared.changed.notify_all();
+                    break;
+                }
+                assert!(Instant::now() < watchdog);
+                drop(state);
+                std::thread::yield_now();
+            }
+            assert!(matches!(
+                bounded(move || worker.join().unwrap()),
+                Err(PoolError::BudgetTooSmall { .. })
+            ));
+            drop(owner);
+        });
     }
     #[test]
     fn cold_allocation_unlocks_and_cancel_rolls_back() {

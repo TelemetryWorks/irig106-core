@@ -140,6 +140,9 @@ fn burst(pool: &BlockPool) {
 // One test keeps global allocation instrumentation isolated from other tests.
 #[test]
 fn bounded_pool_ownership_pressure_cancellation_and_burst_hysteresis() {
+    joined(thread::spawn(pool_cases));
+}
+fn pool_cases() {
     fn send<T: Send>() {}
     send::<BlockPool>();
     send::<irig106_core::PooledBlock>();
