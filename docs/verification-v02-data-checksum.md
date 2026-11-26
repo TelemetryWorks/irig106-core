@@ -63,13 +63,17 @@ No merge, version bump, tag or publication is authorized.
 
 The original scalar reduction costs are superseded by the optimized exact-head
 benchmark in the PR. Tried widened u64 word lanes and packed widened lanes;
-the selected safe-std kernel processes 64-byte groups with independent modular
+the selected safe-std kernel processes 128-byte groups with independent modular
 lanes and a u64 horizontal reduction. No dependencies, unsafe code, CPU-specific
-intrinsics, target-cpu flags, I/O changes or altered benchmark baseline.
+intrinsics, target-cpu flags or I/O strategy changes. Both benchmark modes use
+the same file and policy. Large cases aggregate 16 separately timed passes per
+sample, keeping the file at 32 MiB and construction excluded, to improve timing
+precision over the original ~1–4 ms samples.
 For width w, sum_i(sum_j(x_ij) mod 2^w) mod 2^w equals sum_ij(x_ij) mod 2^w.
 Thus native-width lane wrapping is exact, avoids widening every byte/word, and
 allows LLVM to emit wide vector loads/adds. The existing four-byte carry still
-handles incomplete words; scalar cleanup visits only the last <64 bytes.
+handles incomplete words; scalar cleanup handles a word-preserving alignment prefix and last <128 bytes;
+short spans avoid the lane setup/reduction cost.
 Inspected aarch64 release assembly contains paired vector loads plus add .16b,
 .8h and .4s. Auto-vectorization is compiler/target-dependent, not a wire contract.
 

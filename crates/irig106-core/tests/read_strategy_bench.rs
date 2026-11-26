@@ -142,7 +142,7 @@ fn read_benchmark_case(checksums: bool) {
         "small_body"
     };
     println!(
-        "{label}: median of 3 alternating modes; checksum comparison uses same actual hybrid and valid fixtures, generation/construction/warm-up excluded; warm-cache informational throughput"
+        "{label}: median of 3 alternating modes; checksum comparison uses same actual hybrid and valid fixtures, generation/construction/warm-up excluded; warm-cache informational throughput; checksum 64/512 KiB cases aggregate 16 timed passes per sample over the same bounded file for precision"
     );
     let widths: &[usize] = if checksums { &[1, 2, 4] } else { &[0] };
     for (width, case, p) in widths.iter().flat_map(|&width| {
@@ -201,33 +201,50 @@ fn read_benchmark_case(checksums: bool) {
         drop(warm.try_next_block().unwrap());
         drop(warm);
         let mut samples: [Vec<Sample>; 2] = std::array::from_fn(|_| Vec::with_capacity(3));
+        // Aggregate repeated timed passes for the sub-ms large cases; both
+        // modes use the same file/work, with construction excluded each pass.
+        let repeats = if checksums && p >= 65_536 { 16 } else { 1 };
         for repetition in 0..3 {
-            for turn in 0..2 {
-                let mode = (case + repetition + turn) % 2;
-                let file = Counted {
-                    input: File::open(&path.0).unwrap(),
-                    calls: 0,
-                };
-                let policy = if checksums {
-                    WholePolicy::new().with_data_checksum_verification(mode == 1)
-                } else if mode == 0 {
-                    WholePolicy::new()
-                        .with_read_ahead_bytes(24)
-                        .with_small_body_cutoff(0)
-                } else {
-                    WholePolicy::new()
-                };
-                let sample = measure(
-                    file,
-                    |source| source.calls,
-                    &pool,
-                    &mut buf,
-                    packets,
-                    policy,
-                );
+            let mut batch: [Sample; 2] = std::array::from_fn(|_| Sample {
+                seconds: 0.0,
+                calls: 0,
+                kernel: Some(0),
+            });
+            for pass in 0..repeats {
+                for turn in 0..2 {
+                    let mode = (case + repetition + pass + turn) % 2;
+                    let file = Counted {
+                        input: File::open(&path.0).unwrap(),
+                        calls: 0,
+                    };
+                    let policy = if checksums {
+                        WholePolicy::new().with_data_checksum_verification(mode == 1)
+                    } else if mode == 0 {
+                        WholePolicy::new()
+                            .with_read_ahead_bytes(24)
+                            .with_small_body_cutoff(0)
+                    } else {
+                        WholePolicy::new()
+                    };
+                    let sample = measure(
+                        file,
+                        |source| source.calls,
+                        &pool,
+                        &mut buf,
+                        packets,
+                        policy,
+                    );
+                    batch[mode].seconds += sample.seconds;
+                    batch[mode].calls += sample.calls;
+                    batch[mode].kernel = batch[mode].kernel.zip(sample.kernel).map(|(a, b)| a + b);
+                }
+            }
+            for (mode, sample) in batch.into_iter().enumerate() {
                 samples[mode].push(sample);
             }
         }
+        let packets = packets * repeats;
+        let total = total * repeats;
         for (index, mut group) in samples.into_iter().enumerate() {
             group.sort_by(|a, b| a.seconds.total_cmp(&b.seconds));
             let median = &group[1];

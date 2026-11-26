@@ -192,7 +192,7 @@ impl DataChecksum {
         }
     }
 }
-// Independent modular lanes over 64-byte groups avoid widening every input
+// Independent modular lanes over 128-byte groups avoid widening every input
 // element. Each lane is congruent to its mathematical wide sum modulo the
 // selected width; the final horizontal reduction therefore has the same low
 // bits. Fixed lane counts allow LLVM to use vector loads/adds. Byte decoding is
@@ -200,16 +200,29 @@ impl DataChecksum {
 macro_rules! lane_sum {
     ($name:ident, $word:ty, $width:expr) => {
         fn $name(bytes: &[u8]) -> u64 {
-            let mut lanes = [0 as $word; 64 / $width];
-            let mut groups = bytes.chunks_exact(64);
+            // Short spans avoid lane initialization/horizontal-reduction cost.
+            if bytes.len() < 1024 {
+                return bytes.chunks_exact($width).fold(0u64, |s, word| {
+                    s.wrapping_add(u64::from(<$word>::from_le_bytes(word.try_into().unwrap())))
+                });
+            }
+            // Keep checksum-word boundaries even when source alignment cannot
+            // be reached (e.g. a u16 word stored at an odd address).
+            let prefix = bytes.as_ptr().align_offset(64).min(bytes.len()) / $width * $width;
+            let (head, bytes) = bytes.split_at(prefix);
+            let mut sum = head.chunks_exact($width).fold(0u64, |s, word| {
+                s.wrapping_add(u64::from(<$word>::from_le_bytes(word.try_into().unwrap())))
+            });
+            let mut lanes = [0 as $word; 128 / $width];
+            let mut groups = bytes.chunks_exact(128);
             for group in &mut groups {
                 for (lane, word) in lanes.iter_mut().zip(group.chunks_exact($width)) {
                     *lane = lane.wrapping_add(<$word>::from_le_bytes(word.try_into().unwrap()));
                 }
             }
-            let mut sum = lanes
+            sum = lanes
                 .into_iter()
-                .fold(0u64, |s, v| s.wrapping_add(u64::from(v)));
+                .fold(sum, |s, v| s.wrapping_add(u64::from(v)));
             for word in groups.remainder().chunks_exact($width) {
                 sum = sum.wrapping_add(u64::from(<$word>::from_le_bytes(word.try_into().unwrap())));
             }
