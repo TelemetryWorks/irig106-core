@@ -2,7 +2,7 @@
 use crate::{
     admission::{probe, seek_retry},
     pool::Workspace,
-    reader::FrameStart,
+    reader::{FrameStart, RECOVERY_BYTES},
     *,
 };
 use std::{
@@ -150,21 +150,26 @@ impl<R: Read> WholePacketReader<R> {
     /// Non-seekable input. Oversoft packets require explicit policy stream opt-in.
     pub fn stream(input: R, policy: WholePolicy, pool: BlockPool) -> Result<Self, Error> {
         let workspace = pool
-            .workspace(mem::size_of::<Self>() + QUANTUM + 512)
+            .workspace(mem::size_of::<Self>() + QUANTUM + RECOVERY_BYTES + 512)
             .map_err(|source| Error {
                 reason: ErrorKind::Pool { source },
                 position: 0,
                 recovery: None,
             })?;
         Ok(Self {
-            framing: PacketReader::direct(input, policy.recovery),
+            framing: PacketReader::direct(input, policy.recovery).map_err(|source| Error {
+                reason: ErrorKind::Pool { source },
+                position: 0,
+                recovery: None,
+            })?,
             policy,
             pool,
             source: None,
             _workspace: workspace,
         })
     }
-    /// Return the exclusive source; no body read-ahead is retained.
+    /// Return the exclusive source, discarding any recovery scratch read-ahead.
+    /// Its physical cursor may be ahead of position() by up to 8 KiB.
     pub fn into_inner(self) -> R {
         self.framing.into_inner()
     }
@@ -320,7 +325,7 @@ impl<R: Read> WholePacketReader<R> {
                 0
             };
             while filled < valid {
-                let wanted = (valid - filled).min(QUANTUM);
+                let wanted = valid - filled;
                 let n = self
                     .framing
                     .read_counted(&mut block.storage_mut()[filled..filled + wanted])?;

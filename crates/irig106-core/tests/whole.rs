@@ -929,3 +929,82 @@ fn bounded_file_read_benchmark() {
         bytes as f64 / seconds / 1e6
     );
 }
+
+#[test]
+fn recovered_seekable_oversoft_frame_preserves_prefetch_during_probe_or_exact_eof() {
+    for final_frame in [false, true] {
+        let pool = BlockPool::with_defaults().unwrap();
+        let mut buf = PacketBuf::new(pool.clone()).unwrap();
+        let mut bytes = vec![0x55; 100];
+        let expected = frame(524_292, 0, 9, 0);
+        bytes.extend(&expected);
+        if !final_frame {
+            bytes.extend(frame(28, 0, 9, 0));
+        }
+        let mut r =
+            WholePacketReader::seek_checked(stable(bytes), WholePolicy::new(), pool).unwrap();
+        r.next_packet_into(&mut buf, deadline()).unwrap();
+        assert_eq!(buf.info().unwrap().recovered_bytes, 100);
+        assert_eq!(
+            buf.frame_spans().flatten().copied().collect::<Vec<_>>(),
+            expected
+        );
+        if final_frame {
+            assert_eq!(
+                buf.info().unwrap().admission.authorization,
+                Authorization::Unconfirmed(UnconfirmedReason::ExactEof)
+            );
+        } else {
+            assert!(matches!(
+                buf.info().unwrap().admission.authorization,
+                Authorization::NextHeader {
+                    offset: 524_392,
+                    ..
+                }
+            ));
+            r.next_packet_into(&mut buf, deadline()).unwrap();
+            assert_eq!(buf.contiguous().unwrap(), frame(28, 0, 9, 0));
+        }
+    }
+}
+struct RecoveryShort {
+    input: Cursor<Vec<u8>>,
+    interrupt: bool,
+}
+impl Read for RecoveryShort {
+    fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
+        if !self.interrupt && self.input.position() >= 24 {
+            self.interrupt = true;
+            return Err(io::ErrorKind::Interrupted.into());
+        }
+        let n = b.len().min(7);
+        self.input.read(&mut b[..n])
+    }
+}
+#[test]
+fn recovery_chunk_boundaries_and_short_interrupted_input_keep_exact_bytes() {
+    for short in [false, true] {
+        let pool = BlockPool::with_defaults().unwrap();
+        let mut buf = PacketBuf::new(pool.clone()).unwrap();
+        let mut bytes = vec![0x55; 8215];
+        bytes.extend(frame(28, 0, 9, 0));
+        if short {
+            let mut r = WholePacketReader::stream(
+                RecoveryShort {
+                    input: Cursor::new(bytes),
+                    interrupt: false,
+                },
+                WholePolicy::new(),
+                pool,
+            )
+            .unwrap();
+            r.next_packet_into(&mut buf, deadline()).unwrap();
+        } else {
+            let mut r =
+                WholePacketReader::stream(Cursor::new(bytes), WholePolicy::new(), pool).unwrap();
+            r.next_packet_into(&mut buf, deadline()).unwrap();
+        }
+        assert_eq!(buf.info().unwrap().offset, 8215);
+        assert_eq!(buf.contiguous().unwrap(), frame(28, 0, 9, 0));
+    }
+}

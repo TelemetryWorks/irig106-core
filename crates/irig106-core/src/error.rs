@@ -144,8 +144,8 @@ impl Error {
             ErrorKind::Io { source: error } => error.kind(),
             ErrorKind::Pool { source } => match source {
                 PoolError::DeadlineExceeded => io::ErrorKind::TimedOut,
-                PoolError::WouldBlock | PoolError::BudgetUnavailable => io::ErrorKind::WouldBlock,
-                PoolError::Cancelled => io::ErrorKind::Interrupted,
+                PoolError::WouldBlock => io::ErrorKind::WouldBlock,
+                PoolError::Cancelled | PoolError::BudgetUnavailable => io::ErrorKind::Other,
                 PoolError::BudgetTooSmall { .. } | PoolError::InvalidRequest => {
                     io::ErrorKind::InvalidInput
                 }

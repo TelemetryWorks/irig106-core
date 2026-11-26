@@ -57,6 +57,9 @@ jobs:
       - name: Maximum setup at default H/B (128 MiB, generated in core process)
         if: matrix.os == 'ubuntu-24.04'
         run: cargo test -p irig106-core --test whole --locked maximum_setup_fits_default_h_and_b -- --ignored --exact
+      - name: Bounded warm-cache file read benchmark (informational)
+        if: matrix.os == 'ubuntu-24.04'
+        run: cargo test -p irig106-core --test whole --locked bounded_file_read_benchmark -- --ignored --exact --nocapture
 
   contract:
     name: Workspace, lint, docs and package

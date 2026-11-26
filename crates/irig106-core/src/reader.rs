@@ -1,7 +1,8 @@
 //! Promoted time S16b transport; partial L3-IO-002/CAP-002/REC-003/END-004.
 //! No payload meaning; completion and recovery evidence are structure only.
 use crate::{
-    Error, ErrorKind, Header, HeaderError, PacketRanges, Recovery, SecondaryIntegrity, Tail,
+    Error, ErrorKind, Header, HeaderError, PacketRanges, PoolError, Recovery, SecondaryIntegrity,
+    Tail,
 };
 use std::io::{self, BufRead, BufReader, Read};
 
@@ -123,6 +124,14 @@ pub enum Event {
         recovery: Option<Recovery>,
     },
 }
+pub(crate) const RECOVERY_BYTES: usize = 8192;
+#[derive(Debug)]
+struct RecoveryScratch {
+    bytes: Vec<u8>,
+    used: usize,
+    available: usize,
+}
+
 /// Constant transport space: buffer + 24-byte window + caller-bounded capture.
 /// Returned packets belong to the caller; retaining them is its responsibility.
 /// Errors are terminal. A truncated final packet is not rescanned: its consumed
@@ -130,6 +139,7 @@ pub enum Event {
 #[derive(Debug)]
 pub struct PacketReader<R> {
     input: BufReader<R>,
+    scratch: Option<RecoveryScratch>,
     limits: ReaderLimits,
     pub(crate) position: u64,
     pub(crate) established: bool,
@@ -148,6 +158,7 @@ impl<R: Read> PacketReader<R> {
         }
         Ok(Self {
             input: BufReader::with_capacity(limits.buffer_bytes, input),
+            scratch: None,
             limits,
             position: 0,
             established: false,
@@ -155,15 +166,49 @@ impl<R: Read> PacketReader<R> {
             recovery: None,
         })
     }
-    pub(crate) fn direct(input: R, recovery_bytes: Option<u64>) -> Self {
-        Self {
+    pub(crate) fn direct(input: R, recovery_bytes: Option<u64>) -> Result<Self, PoolError> {
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(RECOVERY_BYTES)?;
+        if bytes.capacity() != RECOVERY_BYTES {
+            return Err(PoolError::UnexpectedCapacity);
+        }
+        bytes.resize(RECOVERY_BYTES, 0);
+        Ok(Self {
             input: BufReader::with_capacity(0, input),
+            scratch: Some(RecoveryScratch {
+                bytes,
+                used: 0,
+                available: 0,
+            }),
             limits: ReaderLimits::new().with_recovery_bytes(recovery_bytes),
             position: 0,
             established: false,
             done: false,
             recovery: None,
+        })
+    }
+    // Recovery alone prefetches a fixed chunk. Logical position/scanned counts
+    // advance only on consumption, not on this bounded source read-ahead.
+    fn recovery_byte(&mut self, out: &mut [u8]) -> Result<usize, ErrorKind> {
+        if let Some(scratch) = &mut self.scratch {
+            if scratch.used == scratch.available {
+                loop {
+                    match self.input.read(&mut scratch.bytes) {
+                        Ok(n) => {
+                            scratch.used = 0;
+                            scratch.available = n;
+                            if n == 0 {
+                                return Ok(0);
+                            }
+                            break;
+                        }
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(e) => return Err(e.into()),
+                    }
+                }
+            }
         }
+        self.read_counted(out)
     }
     pub(crate) fn source(&mut self) -> &mut R {
         self.input.get_mut()
@@ -186,7 +231,21 @@ impl<R: Read> PacketReader<R> {
     pub(crate) fn read_counted(&mut self, out: &mut [u8]) -> Result<usize, ErrorKind> {
         let mut total = 0;
         while total < out.len() {
-            match self.input.read(&mut out[total..]) {
+            let buffered = if let Some(scratch) = &mut self.scratch {
+                let n = (scratch.available - scratch.used).min(out.len() - total);
+                out[total..total + n]
+                    .copy_from_slice(&scratch.bytes[scratch.used..scratch.used + n]);
+                scratch.used += n;
+                n
+            } else {
+                0
+            };
+            let result = if buffered > 0 {
+                Ok(buffered)
+            } else {
+                self.input.read(&mut out[total..])
+            };
+            match result {
                 Ok(0) => break,
                 Ok(n) => {
                     self.advance(n)?;
@@ -291,7 +350,7 @@ impl<R: Read> PacketReader<R> {
                 }
             }
             b.copy_within(1.., 0);
-            if self.read_counted(&mut b[23..])? == 0 {
+            if self.recovery_byte(&mut b[23..])? == 0 {
                 return self
                     .tail(start, TailKind::Unsynchronized)
                     .map(FrameStart::End);
