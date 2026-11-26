@@ -52,3 +52,15 @@ nonzero-channel setup with explicit legacy policy on/off, and ordinary data with
 legacy enabled. CI explicitly runs this example unit test before the subprocess
 fixtures. Legacy notices use admission evidence; inventory setup_record remains
 channel-0 only. Library code, admission counters and read strategy are unchanged.
+
+
+## Review correction: visible uncertain controls
+
+Control classification is now Control / Uncertain / None. The unit matrix pins
+Uncertain for Unknown(17)/type0x12 and nonzero-channel type01 without legacy
+policy. It exercises the real notification writer, checking exact offset/kind/
+edition evidence and an unchanged revision for both cases. Known controls advance
+the revision; unrelated DATA emits no control notice. A subprocess regression
+reproduced silent nonzero setup dispatch before the fix; it now checks visible
+uncertainty before dispatch, unchanged worker revisions, retained packets and the
+unchanged channel-0-only setup presence rule. No library/counter policy change.

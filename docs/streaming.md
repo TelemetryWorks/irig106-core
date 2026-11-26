@@ -19,7 +19,11 @@ If the caller explicitly selects with_legacy_setup_any_channel(true), notices
 also cover type01 on nonzero channels using the admission evidence. The default
 does not infer legacy mode. Inventory setup_record presence remains **channel-0
 only**, even under the legacy allowance; a nonzero-channel setup notification
-does not change that structural presence rule. **These are header routing
+does not change that structural presence rule. Classification is three-way:
+Control advances the revision; Uncertain visibly reports offset, raw kind and
+edition but keeps the prior revision and dispatches ordinary data; None dispatches
+without a control notice. Uncertain covers 0x12 without an established 106-17+
+edition and nonzero-channel type01 without the explicit legacy option. **These are header routing
 notifications, not setup parsing, setup closure or interpreted time epochs.**
 Downstream orchestration must perform setup closure (INT-045), validate/apply
 setup changes and resolve time references/epochs here before publishing a bounded
