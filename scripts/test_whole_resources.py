@@ -42,6 +42,15 @@ class WholeResources(unittest.TestCase):
         with self.assertRaises(AssertionError):
             validate(sample | dict(blocks="2", used="1200000"), 3000, 12288)
 
+    def test_coalesced_capacity_is_part_of_used_bytes(self):
+        sample = dict(phase="coalesced", pid="1", budget=str(272*1024*1024),
+                      blocks="256", idle="0", coalesced=str(128*1024*1024+256),
+                      used=str(256*1024*1024+512))
+        validate(sample, 260*1024, 272*1024)
+        for changed in [dict(coalesced="0"), dict(used=str(128*1024*1024))]:
+            with self.subTest(changed=changed), self.assertRaises(AssertionError):
+                validate(sample | changed, 260*1024, 272*1024)
+
     def test_pressure_requires_full_budget_and_trim(self):
         sample = dict(phase="blocked", pid="1", budget="16777216", used="16254000", blocks="31", idle="0")
         validate(sample, 20000, 24576)

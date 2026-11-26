@@ -526,6 +526,13 @@ fn maximum_setup_fits_default_h_and_b_case() {
     );
     assert_eq!(buf.frame_spans().last().unwrap()[BLOCK_BYTES - 1], 0x5a);
     assert!(pool.stats().unwrap().used_bytes <= DEFAULT_POOL_BUDGET);
+    let before = pool.stats().unwrap().used_bytes;
+    assert!(matches!(
+        buf.coalesce_until(deadline()),
+        Err(PoolError::BudgetTooSmall { .. })
+    ));
+    assert_eq!(pool.stats().unwrap().used_bytes, before);
+    assert_eq!(pool.stats().unwrap().coalesced_bytes, 0);
     buf.clear();
     assert_eq!(pool.stats().unwrap().idle_blocks, 8);
 }

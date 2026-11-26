@@ -12,7 +12,7 @@ use std::{
 };
 const QUANTUM: usize = 4096;
 /// Complete-frame routing and admission evidence; never a payload interpretation.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct PacketInfo {
     /// Absolute frame start.
@@ -27,6 +27,54 @@ pub struct PacketInfo {
     pub recovered_bytes: u64,
     /// Explicit size authorization.
     pub admission: AdmissionEvidence,
+}
+/// Explicit successful coalescing evidence, never a new transport observation.
+/// ```compile_fail,E0639
+/// use irig106_core::CoalescingEvidence;
+/// fn closed(e: CoalescingEvidence) { let _ = CoalescingEvidence { ..e }; }
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CoalescingEvidence {
+    /// Original absolute packet offset.
+    pub offset: u64,
+    /// Complete frame bytes explicitly copied, including headers/filler/trailer.
+    pub copied_bytes: usize,
+    /// Input blocks still charged simultaneously during the copy.
+    pub source_blocks: usize,
+    /// Retained payload capacity plus metadata charged to B.
+    pub charged_bytes: usize,
+}
+/// Independently owned contiguous copy, explicitly created under the same B.
+/// Spans remain the allocation-free default. Drop frees storage before credits.
+/// ```compile_fail,E0505
+/// use irig106_core::CoalescedPacket;
+/// fn borrowed(p: CoalescedPacket) { let data = p.data(); drop(p); println!("{:?}", data); }
+/// ```
+#[derive(Debug)]
+pub struct CoalescedPacket {
+    bytes: Vec<u8>, // Field order is significant: free before _lease Drop.
+    info: PacketInfo,
+    evidence: CoalescingEvidence,
+    _lease: crate::pool::CoalescedLease,
+}
+impl CoalescedPacket {
+    /// Borrow the entire original frame, without another copy.
+    pub fn frame(&self) -> &[u8] {
+        &self.bytes
+    }
+    /// Borrow DATA only; excludes secondary/filler/checksum bytes.
+    pub fn data(&self) -> &[u8] {
+        &self.bytes[self.info.ranges.data.start as usize..self.info.ranges.data.end as usize]
+    }
+    /// Preserved admission/integrity/routing evidence; do not inspect twice.
+    pub fn info(&self) -> &PacketInfo {
+        &self.info
+    }
+    /// Report every explicit copy and its accounted cost.
+    pub fn evidence(&self) -> CoalescingEvidence {
+        self.evidence
+    }
 }
 /// Caller-reusable owned frame storage. Move it to workers; borrow its slices.
 /// Descriptor capacity is reserved/charged from B at construction, never from P.
@@ -102,6 +150,59 @@ impl PacketBuf {
                 let end = range.end.saturating_sub(offset).min(BLOCK_BYTES);
                 (start < end).then(|| &b.storage()[start..end])
             })
+    }
+    /// Explicitly copy a COMPLETE frame into independently owned contiguous storage.
+    /// Old+new capacity is charged. Never waits for credits/another build while
+    /// retaining input: WouldBlock requires release/retry. Deadline/cancellation
+    /// are checked between bounded block copies, not inside the OS allocator.
+    /// Source remains unchanged on success or failure; one-block callers can
+    /// instead borrow contiguous() without copying. No automatic fallback.
+    pub fn coalesce_until(&self, deadline: Instant) -> Result<CoalescedPacket, PoolError> {
+        self.coalesce_using(deadline, Instant::now)
+    }
+    fn coalesce_using(
+        &self,
+        deadline: Instant,
+        mut now: impl FnMut() -> Instant,
+    ) -> Result<CoalescedPacket, PoolError> {
+        let check = |clock: &mut dyn FnMut() -> Instant| {
+            self.pool.live()?;
+            if clock() >= deadline {
+                Err(PoolError::DeadlineExceeded)
+            } else {
+                Ok(())
+            }
+        };
+        check(&mut now)?;
+        let info = self.info.as_ref().ok_or(PoolError::InvalidRequest)?;
+        let length =
+            usize::try_from(info.header.packet_length()).map_err(|_| PoolError::InvalidRequest)?;
+        let charged_bytes = length
+            .checked_add(mem::size_of::<CoalescedPacket>())
+            .ok_or(PoolError::InvalidRequest)?;
+        let lease = self.pool.coalescing(charged_bytes, self.blocks.len())?;
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(length)?;
+        if bytes.capacity() != length {
+            return Err(PoolError::UnexpectedCapacity);
+        }
+        for span in self.frame_spans() {
+            check(&mut now)?;
+            // The complete source proves summed spans <= reserved capacity.
+            bytes.extend_from_slice(span);
+        }
+        check(&mut now)?;
+        Ok(CoalescedPacket {
+            bytes,
+            info: info.clone(),
+            evidence: CoalescingEvidence {
+                offset: info.offset,
+                copied_bytes: length,
+                source_blocks: self.blocks.len(),
+                charged_bytes,
+            },
+            _lease: lease,
+        })
     }
     /// Return payload storage, retaining charged descriptors for reuse.
     pub fn clear(&mut self) {
@@ -425,5 +526,52 @@ impl<R: StableSource> WholePacketReader<R> {
             origin,
         });
         Ok(reader)
+    }
+}
+
+#[cfg(test)]
+mod coalescing_tests {
+    use super::*;
+    #[test]
+    fn cooperative_copy_expiry_and_cancel_roll_back() {
+        for cancel in [false, true] {
+            let pool = BlockPool::with_defaults().unwrap();
+            let p = BLOCK_BYTES + 28;
+            let mut bytes = vec![0u8; p];
+            bytes[..2].copy_from_slice(&[0x25, 0xeb]);
+            bytes[4..8].copy_from_slice(&(p as u32).to_le_bytes());
+            bytes[8..12].copy_from_slice(&4u32.to_le_bytes());
+            bytes[15] = 1;
+            let sum = primary_checksum(bytes[..24].try_into().unwrap());
+            bytes[22..24].copy_from_slice(&sum.to_le_bytes());
+            let mut source = PacketBuf::new(pool.clone()).unwrap();
+            let mut reader =
+                WholePacketReader::stream(io::Cursor::new(bytes), WholePolicy::new(), pool.clone())
+                    .unwrap();
+            let before_time = Instant::now();
+            let end = before_time + std::time::Duration::from_secs(5);
+            reader.next_packet_into(&mut source, end).unwrap();
+            let mut calls = 0;
+            let result = source.coalesce_using(end, || {
+                calls += 1;
+                if calls == 3 {
+                    // First block copied; expire/cancel before completion.
+                    if cancel {
+                        pool.cancel().unwrap();
+                    } else {
+                        return end;
+                    }
+                }
+                before_time
+            });
+            assert!(if cancel {
+                matches!(result, Err(PoolError::Cancelled))
+            } else {
+                matches!(result, Err(PoolError::DeadlineExceeded))
+            });
+            assert_eq!(pool.stats().unwrap().coalesced_bytes, 0);
+            assert!(source.info().is_some());
+            assert_eq!(source.frame_spans().map(|s| s.len()).sum::<usize>(), p);
+        }
     }
 }

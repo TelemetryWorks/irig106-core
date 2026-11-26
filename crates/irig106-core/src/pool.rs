@@ -83,6 +83,7 @@ struct State {
     idle: Vec<Vec<u8>>,
     allocated: usize,
     workspace: usize,
+    coalesced: usize,
     assembling: bool,
     cancelled: bool,
     waiting: usize,
@@ -111,6 +112,8 @@ pub struct PoolStats {
     pub budget_bytes: usize,
     /// Control capacity plus all outstanding/idle blocks and lease allowance.
     pub used_bytes: usize,
+    /// Live coalesced payload capacity plus its charged metadata, not permanent workspace.
+    pub coalesced_bytes: usize,
     /// Blocks currently owned by the pool or workers.
     pub allocated_blocks: usize,
     /// Reusable blocks; ordinary returns may retain more than eight.
@@ -152,6 +155,7 @@ impl BlockPool {
                     idle,
                     allocated: 0,
                     workspace: 0,
+                    coalesced: 0,
                     assembling: false,
                     cancelled: false,
                     waiting: 0,
@@ -176,7 +180,11 @@ impl BlockPool {
     ) -> Result<MutexGuard<'a, State>, PoolError> {
         // No ownership/thread inference: only absence of all possible returners
         // proves that waiting cannot help. Callers check readiness before this.
-        if !state.assembling && state.allocated == state.idle.len() && state.workspace == 0 {
+        if !state.assembling
+            && state.allocated == state.idle.len()
+            && state.workspace == 0
+            && state.coalesced == 0
+        {
             return Err(PoolError::BudgetUnavailable);
         }
         let deadline = deadline.ok_or(PoolError::WouldBlock)?;
@@ -305,11 +313,59 @@ impl BlockPool {
         }
         // Construction never evicts the warmed pool implicitly. Callers can
         // explicitly trim/release blocks and retry this nonblocking reservation.
-        if unavoidable + state.allocated * UNIT > self.shared.budget {
+        if unavoidable + state.allocated * UNIT + state.coalesced > self.shared.budget {
             return Err(PoolError::WouldBlock);
         }
         state.workspace += bytes;
         Ok(Workspace {
+            pool: self.clone(),
+            bytes,
+        })
+    }
+    pub(crate) fn live(&self) -> Result<(), PoolError> {
+        if self.lock()?.cancelled {
+            Err(PoolError::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+    pub(crate) fn coalescing(
+        &self,
+        bytes: usize,
+        source_blocks: usize,
+    ) -> Result<CoalescedLease, PoolError> {
+        let mut state = self.lock()?;
+        if state.cancelled {
+            return Err(PoolError::Cancelled);
+        }
+        let needed = source_blocks
+            .checked_mul(UNIT)
+            .and_then(|n| n.checked_add(bytes))
+            .and_then(|n| n.checked_add(self.shared.fixed))
+            .and_then(|n| n.checked_add(state.workspace))
+            .unwrap_or(usize::MAX);
+        if needed > self.shared.budget {
+            return Err(PoolError::BudgetTooSmall {
+                needed,
+                limit: self.shared.budget,
+            });
+        }
+        // Waiting while retaining input could deadlock the active build. The
+        // caller must release/retry, never wait for a permit here.
+        if state.assembling {
+            return Err(PoolError::WouldBlock);
+        }
+        let base = self.shared.fixed + state.workspace + state.coalesced;
+        while base + state.allocated * UNIT + bytes > self.shared.budget && !state.idle.is_empty() {
+            drop(state.idle.pop());
+            state.allocated -= 1;
+        }
+        self.shared.changed.notify_all();
+        if base + state.allocated * UNIT + bytes > self.shared.budget {
+            return Err(PoolError::WouldBlock);
+        }
+        state.coalesced += bytes;
+        Ok(CoalescedLease {
             pool: self.clone(),
             bytes,
         })
@@ -347,7 +403,11 @@ impl BlockPool {
         let state = self.lock()?;
         Ok(PoolStats {
             budget_bytes: self.shared.budget,
-            used_bytes: self.shared.fixed + state.workspace + state.allocated * UNIT,
+            used_bytes: self.shared.fixed
+                + state.workspace
+                + state.allocated * UNIT
+                + state.coalesced,
+            coalesced_bytes: state.coalesced,
             allocated_blocks: state.allocated,
             idle_blocks: state.idle.len(),
             block_allocations: state.allocations,
@@ -364,6 +424,21 @@ impl Drop for Workspace {
     fn drop(&mut self) {
         if let Ok(mut state) = self.pool.lock() {
             state.workspace -= self.bytes;
+            self.pool.shared.changed.notify_all();
+        }
+    }
+}
+
+// Dropped AFTER the coalesced Vec, so freed bytes precede returned credits.
+#[derive(Debug)]
+pub(crate) struct CoalescedLease {
+    pool: BlockPool,
+    bytes: usize,
+}
+impl Drop for CoalescedLease {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.pool.lock() {
+            state.coalesced -= self.bytes;
             self.pool.shared.changed.notify_all();
         }
     }
@@ -410,7 +485,10 @@ impl BlockAssembly {
             if let Some(bytes) = state.idle.pop() {
                 break bytes;
             }
-            if self.pool.shared.fixed + state.workspace + (state.allocated + 1) * UNIT
+            if self.pool.shared.fixed
+                + state.workspace
+                + state.coalesced
+                + (state.allocated + 1) * UNIT
                 <= self.pool.shared.budget
             {
                 state.allocated += 1; // Claim before reservation/initialization.
