@@ -191,14 +191,18 @@ The Trusted Publishing pipeline keeps publication separately authorized.
 
 BlockPool::with_defaults() uses B = 256 MiB; new(bytes) is fallible. Construction
 reserves charged control descriptors, with zero 512 KiB payload blocks.
-BlockPool::begin(block_count) checks eventual feasibility without reserving payload
-and admits one BlockAssembly at a time. Default begin()/next_block() return
-BudgetUnavailable immediately on admission/credit pressure, including same-thread
-retention. Explicit begin_until()/next_block_until() use an absolute wait deadline,
-recheck predicates after spurious wakes and return DeadlineExceeded on expiry
-without cancelling the pool or consuming an assembly slot. Choose bounded waits
-only when another owner can make progress. Readiness is checked before expiry;
-the deadline bounds waiting, not I/O/allocation time. next_block() yields PooledBlock;
+BlockPool::try_begin(block_count) checks eventual feasibility without reserving
+payload and admits one BlockAssembly at a time. Explicit try_begin()/try_next_block()
+return WouldBlock on admission/credit contention. begin_until()/next_block_until()
+wait to an absolute deadline while a possible returner exists; spurious wakes
+recheck predicates. Expiry returns DeadlineExceeded without cancelling the pool
+or consuming an assembly slot. BudgetUnavailable is reserved for provable absence
+of outstanding returners, not inferred ownership/thread identity. Current public
+fixed-block acquisition normally has room, a possible returner, or an upfront
+BudgetTooSmall error; the no-returner guard protects the internal wait boundary.
+A single-threaded reader retaining earlier blocks uses a deadline or try-acquire.
+Readiness is checked before expiry; deadlines bound waiting, not I/O/allocation.
+try_next_block() or next_block_until() yields owned PooledBlock;
 storage_mut() is an initialized direct-read destination, not a valid packet view.
 Workers return blocks by Drop. Ordinary returns retain the warmed high-water set;
 trim_after_return(actual_packet_blocks) trims only above eight, and

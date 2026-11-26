@@ -25,8 +25,10 @@ pub enum PoolError {
     },
     /// Zero working set, exhausted assembly, or unsupported target-sized limit.
     InvalidRequest,
-    /// Admission or credits are unavailable; the default operation never waits.
+    /// No outstanding assembly or block exists that could release resources.
     BudgetUnavailable,
+    /// An explicit nonblocking acquisition encountered temporary contention.
+    WouldBlock,
     /// An explicit absolute wait deadline expired while resources were unavailable.
     DeadlineExceeded,
     /// The caller cancelled this pool and all pending/future acquisitions.
@@ -50,8 +52,9 @@ impl fmt::Display for PoolError {
             }
             Self::InvalidRequest => f.write_str("invalid pool working set or target limit"),
             Self::BudgetUnavailable => {
-                f.write_str("storage budget or assembly unavailable without waiting")
+                f.write_str("storage unavailable with no outstanding resource returner")
             }
+            Self::WouldBlock => f.write_str("storage acquisition would block"),
             Self::DeadlineExceeded => f.write_str("storage wait deadline exceeded"),
             Self::Cancelled => f.write_str("storage pool cancelled"),
             Self::Poisoned => f.write_str("storage pool synchronization failed"),
@@ -169,7 +172,12 @@ impl BlockPool {
         mut state: MutexGuard<'a, State>,
         deadline: Option<Instant>,
     ) -> Result<MutexGuard<'a, State>, PoolError> {
-        let deadline = deadline.ok_or(PoolError::BudgetUnavailable)?;
+        // No ownership/thread inference: only absence of all possible returners
+        // proves that waiting cannot help. Callers check readiness before this.
+        if !state.assembling && state.allocated == state.idle.len() {
+            return Err(PoolError::BudgetUnavailable);
+        }
+        let deadline = deadline.ok_or(PoolError::WouldBlock)?;
         let remaining = deadline
             .checked_duration_since(Instant::now())
             .filter(|duration| !duration.is_zero())
@@ -190,9 +198,9 @@ impl BlockPool {
     }
     /// Acquire the sole assembly permit, after checking eventual feasibility.
     /// `blocks` is a maximum working set, not a reservation/allocation request.
-    /// Never waits: contention returns BudgetUnavailable, including re-entry while
-    /// this thread holds an earlier permit. Use begin_until for bounded waiting.
-    pub fn begin(&self, blocks: usize) -> Result<BlockAssembly, PoolError> {
+    /// Explicitly nonblocking: contention returns WouldBlock. No thread ownership
+    /// inference is made. Use begin_until for deadline-bounded waiting.
+    pub fn try_begin(&self, blocks: usize) -> Result<BlockAssembly, PoolError> {
         self.begin_using(blocks, None)
     }
     /// Wait until the absolute deadline when another owner can release admission.
@@ -287,10 +295,10 @@ pub struct BlockAssembly {
 }
 impl BlockAssembly {
     /// Obtain one initialized final-storage block without waiting for credits.
-    /// Returns BudgetUnavailable if earlier retained blocks consume the budget.
+    /// Explicitly nonblocking: WouldBlock means other blocks retain the credits.
     /// The caller must only acquire after filling the preceding block; this
     /// storage primitive has no knowledge of input arrival or valid frame length.
-    pub fn next_block(&mut self) -> Result<PooledBlock, PoolError> {
+    pub fn try_next_block(&mut self) -> Result<PooledBlock, PoolError> {
         self.next_block_using(None, Self::allocate)
     }
     /// Wait until an absolute deadline when another owner can return credits.
@@ -370,8 +378,8 @@ impl Drop for BlockAssembly {
 /// ```compile_fail,E0505
 /// use irig106_core::BlockPool;
 /// let pool = BlockPool::with_defaults().unwrap();
-/// let mut assembly = pool.begin(1).unwrap();
-/// let block = assembly.next_block().unwrap();
+/// let mut assembly = pool.try_begin(1).unwrap();
+/// let block = assembly.try_next_block().unwrap();
 /// let view = block.storage();
 /// drop(block);
 /// println!("{}", view[0]);
@@ -413,7 +421,7 @@ mod tests {
     fn failed_reservation_and_capacity_mismatch_roll_back_credits() {
         let pool = BlockPool::with_defaults().unwrap();
         let before = pool.stats().unwrap().used_bytes;
-        let mut assembly = pool.begin(1).unwrap();
+        let mut assembly = pool.try_begin(1).unwrap();
         let error = assembly.next_block_using(None, || {
             let mut bytes = Vec::new();
             bytes.try_reserve_exact(usize::MAX)?;
@@ -426,15 +434,15 @@ mod tests {
             Err(PoolError::UnexpectedCapacity)
         ));
         assert_eq!(pool.stats().unwrap().used_bytes, before);
-        drop(assembly.next_block().unwrap());
+        drop(assembly.try_next_block().unwrap());
         assert_eq!(pool.stats().unwrap().allocated_blocks, 1);
     }
     #[test]
     fn cancel_clears_idle_blocks_and_credits() {
         let pool = BlockPool::with_defaults().unwrap();
         let fixed = pool.stats().unwrap().used_bytes;
-        let mut a = pool.begin(2).unwrap();
-        let blocks = [a.next_block().unwrap(), a.next_block().unwrap()];
+        let mut a = pool.try_begin(2).unwrap();
+        let blocks = [a.try_next_block().unwrap(), a.try_next_block().unwrap()];
         drop(a);
         drop(blocks);
         assert_eq!(pool.stats().unwrap().idle_blocks, 2);
@@ -446,17 +454,37 @@ mod tests {
         assert_eq!(pool.stats().unwrap().used_bytes, fixed);
     }
     #[test]
+    fn no_returner_is_provable_only_without_outstanding_resources() {
+        let pool = BlockPool::with_defaults().unwrap();
+        // Exercise the wait boundary directly: public acquisition is ready in
+        // this state, so it never needs to wait. No owner can release anything.
+        let state = pool.lock().unwrap();
+        assert!(matches!(
+            pool.wait(state, Some(Instant::now())),
+            Err(PoolError::BudgetUnavailable)
+        ));
+        assert_eq!(pool.stats().unwrap().waiting, 0);
+        // An outstanding permit is a possible returner even on this thread.
+        let owner = pool.try_begin(1).unwrap();
+        assert!(matches!(pool.try_begin(1), Err(PoolError::WouldBlock)));
+        assert!(matches!(
+            pool.begin_until(1, Instant::now()),
+            Err(PoolError::DeadlineExceeded)
+        ));
+        drop(owner);
+    }
+    #[test]
     fn deadlines_expire_without_cancelling_or_consuming_resources() {
         use std::time::Duration;
         let pool = BlockPool::new(BLOCK_BYTES + 4096).unwrap();
-        let mut owner = pool.begin(1).unwrap();
+        let mut owner = pool.try_begin(1).unwrap();
         assert!(matches!(
             pool.begin_until(1, Instant::now() + Duration::from_millis(1)),
             Err(PoolError::DeadlineExceeded)
         ));
-        let block = owner.next_block().unwrap();
+        let block = owner.try_next_block().unwrap();
         drop(owner);
-        let mut next = pool.begin(1).unwrap();
+        let mut next = pool.try_begin(1).unwrap();
         assert!(matches!(
             next.next_block_until(Instant::now() + Duration::from_millis(1)),
             Err(PoolError::DeadlineExceeded)
@@ -470,7 +498,7 @@ mod tests {
     fn spurious_notification_rechecks_predicate_and_cancellation() {
         use std::{thread, time::Duration};
         let pool = BlockPool::with_defaults().unwrap();
-        let owner = pool.begin(1).unwrap();
+        let owner = pool.try_begin(1).unwrap();
         let p = pool.clone();
         let worker =
             thread::spawn(move || p.begin_until(1, Instant::now() + Duration::from_secs(30)));
@@ -497,7 +525,7 @@ mod tests {
     fn cold_allocation_unlocks_and_cancel_rolls_back() {
         let pool = BlockPool::with_defaults().unwrap();
         let fixed = pool.stats().unwrap().used_bytes;
-        let mut assembly = pool.begin(1).unwrap();
+        let mut assembly = pool.try_begin(1).unwrap();
         let result = assembly.next_block_using(None, || {
             assert!(pool.shared.state.try_lock().is_ok());
             assert_eq!(pool.stats().unwrap().allocated_blocks, 1);
@@ -510,13 +538,13 @@ mod tests {
     #[test]
     fn poison_is_typed_and_destructors_do_not_panic() {
         let pool = BlockPool::with_defaults().unwrap();
-        let mut assembly = pool.begin(1).unwrap();
-        let block = assembly.next_block().unwrap();
+        let mut assembly = pool.try_begin(1).unwrap();
+        let block = assembly.try_next_block().unwrap();
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = pool.lock().unwrap();
             panic!("poison probe");
         }));
-        assert!(matches!(pool.begin(1), Err(PoolError::Poisoned)));
+        assert!(matches!(pool.try_begin(1), Err(PoolError::Poisoned)));
         assert!(matches!(pool.cancel(), Err(PoolError::Poisoned)));
         drop(block);
         drop(assembly);

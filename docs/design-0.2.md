@@ -278,20 +278,23 @@ input capacity without waiting for a result merger that itself waits for this
 packet. Return queues must accommodate all live slots. Fixed output/reorder
 budgets cannot participate in a circular wait with input credits.
 
-Temporary pressure is handled by an explicit wait policy. Default begin() and
-next_block() **never wait** for admission/credits: they return BudgetUnavailable
-when resources are retained, including same-thread retention with no returner.
-Callers expecting progress from another owner may choose begin_until() or
-next_block_until() with an absolute Instant deadline. Condvar::wait_timeout loops
-recheck readiness, cancellation and the same deadline after every wake, including
-spurious notifications; expiry returns typed DeadlineExceeded without cancelling
-the pool or consuming the remaining assembly slot. There is no unbounded wait API.
+Temporary pressure is handled by an explicit wait policy. Nonblocking
+try_begin()/try_next_block() return WouldBlock on contention. Deadline-based
+begin_until()/next_block_until() wait while an outstanding permit or block could
+release resources. Condvar::wait_timeout loops recheck readiness, cancellation
+and the same absolute Instant deadline after every wake; expiry returns typed
+DeadlineExceeded without cancelling the pool or consuming an assembly slot.
+There is no unbounded wait API.
 
-Send transfers do not announce the current owning thread, so the pool does not
-infer reclaimability from a block's creation thread. No-deadline refusal safely
-covers all no-returner cases; explicit deadline waits remain bounded even if the
-caller mistakenly expects a return. Consumer-retained storage can no longer hang
-a default single-threaded reader. Readiness is checked before the wait deadline;
+BudgetUnavailable requires proof that no outstanding assembly/block could return
+resources; it is not inferred from thread identity. In the current fixed-block
+pool, public acquisition normally either has room, has a possible returner, or
+fails the upfront BudgetTooSmall feasibility check. The no-returner guard is
+checked at the internal wait boundary after readiness checks.
+Send transfers do not announce the current holder's thread. A single-threaded
+reader retaining earlier blocks must use a deadline or explicit try-acquire;
+retained leases do not prove absence of a returner. Even a caller mistaken about
+progress gets a bounded deadline wait. Readiness is checked before expiry;
 deadlines bound condition-variable waits, not scheduling, allocation or I/O time.
 Cold allocation/zeroing runs outside the pool mutex after credits are claimed;
 failed or cancelled allocation releases the claim before waking waiters.
@@ -359,7 +362,7 @@ No settings, overcommit policy or process limits are changed by this design.
 | L3-GROW-008 | Authorized huge aligned P on tiny short-read input: allocation requests and touched RSS follow received bytes + fixed quantum; exact tail/preceding results. Mutant preallocating/zeroing P must fail. Include a hard-refusal case separately so it cannot mask the growth test. |
 | L3-ADM-008 | Real oversoft packet below/exactly/above H; valid/invalid/short next header; false checksum-valid payload header; seek restoration across buffering and recovery; final EOF and nonseek opt-in/refusal. Whole bytes and authorization evidence checked independently. |
 | L3-SETUP-008 | At built-in H = 128 MiB and B = 256 MiB, a complete 128 MiB setup packet (P = H) is accepted with the default block-based representation; coalescing it under default B returns typed BudgetTooSmall without waiting, including with all other buffers returned. Contiguous coalescing/Vec requires B >= 2 x 128 MiB + overhead via caller override, or consume spans. Same size ordinary type needs NextHeader, Unconfirmed(ExactEof) or StreamOptIn; H=64 MiB refuses. Trimmed capacity returns after ownership is released. |
-| L3-BUD-008 | Instrument all live credits/capacity and transient workspace. Gate a worker with bounded handshakes: explicit-deadline checkout waits at budget, no new growth; releasing capacity wakes/completes. A packet that exceeds the entire reclaimed B (including scratch/workspace) errors or reports drain without waiting; exact-fit boundaries include overhead. Immediate BudgetUnavailable handles same-thread retained resources without waiting; absolute-deadline waits test expiry, spurious wakeups and reuse after timeout. Cancel with idle blocks must clear storage/credits. Test completion channels/joins are bounded independently of operation deadlines. Cancellation, retained idle slots, multiple readers and blocked merger cannot deadlock. |
+| L3-BUD-008 | Instrument all live credits/capacity and transient workspace. Gate a worker with bounded handshakes: explicit-deadline checkout waits at budget, no new growth; releasing capacity wakes/completes. A packet that exceeds the entire reclaimed B (including scratch/workspace) errors or reports drain without waiting; exact-fit boundaries include overhead. BudgetUnavailable requires provable absence of outstanding returners, never thread inference; explicit try-acquire returns WouldBlock on contention. Absolute-deadline waits test expiry with retained same-thread resources, spurious wakeups and reuse after timeout. Cancel with idle blocks must clear storage/credits. Test completion channels/joins are bounded independently of operation deadlines. Cancellation, retained idle slots, multiple readers and blocked merger cannot deadlock. |
 | L3-RSS-008 | GNU time wraps prebuilt core-only probe, generation/compilation outside measurement. Cold-construction and lazily warmed tiny bogus-input tests retain the 32 MiB ceiling: assert zero construction payload blocks and idle <= 8 after a large-return/pressure trim event, and measure process baseline plus at most 4 MiB idle payload, control storage and allocator margin; true oversize acceptance gets an explicitly larger justified ceiling. Budget-pressure run bounds touched peak to configured budget plus measured fixed margin. No raising the old capture-path gate to hide a regression. |
 | L3-PLAT-008 | Allocation counters plus Linux touched RSS and Windows commit/working-set evidence; 32-bit checked limits. Controls once with touched preallocation and unbudgeted-retention mutants, then discard mutants. Reserved-but-unwritten memory can evade RSS, so request/accounting assertions are mandatory. |
 

@@ -191,7 +191,10 @@ fn bounded_pool_ownership_pressure_cancellation_and_burst_hysteresis() {
     for _ in 0..9 {
         blocks.push(large.try_next_block().unwrap());
     }
-    assert!(matches!(large.try_next_block(), Err(PoolError::InvalidRequest)));
+    assert!(matches!(
+        large.try_next_block(),
+        Err(PoolError::InvalidRequest)
+    ));
     drop(large);
     drop(blocks);
     assert_eq!(pool.stats().unwrap().idle_blocks, 9);
@@ -213,10 +216,7 @@ fn bounded_pool_ownership_pressure_cancellation_and_burst_hysteresis() {
     drop(first);
     let mut next = joined(next).unwrap();
     // Explicit nonblocking policy, without inferring who owns the earlier block.
-    assert!(matches!(
-        next.try_next_block(),
-        Err(PoolError::WouldBlock)
-    ));
+    assert!(matches!(next.try_next_block(), Err(PoolError::WouldBlock)));
     assert_eq!(small.stats().unwrap().waiting, 0);
     let checkout =
         thread::spawn(move || next.next_block_until(Instant::now() + Duration::from_secs(30)));

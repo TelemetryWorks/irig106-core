@@ -47,12 +47,17 @@ compile failures are distinct from runtime evidence). A temporary probe on
 only an external cancel released it. The idle-cancel mutant now fails with two
 allocated/idle blocks instead of zero. Both probes/mutants were removed.
 
-Default acquisition is now nonwaiting BudgetUnavailable. Explicit absolute-deadline
-variants use wait_timeout and predicate loops; unit checks cover positive expiry,
-spurious notification without readiness, unchanged slot/credits after timeout,
-and reuse. Send does not expose transfer-thread identity: nonwaiting defaults
-handle all no-returner cases without guessing ownership. Bounded waiting is an
-explicit caller choice when another owner may release storage.
+The initial review fix at 879af71 used immediate BudgetUnavailable for all
+nonwaiting contention. The owner's clarification supersedes that policy:
+try_begin()/try_next_block() now explicitly return WouldBlock, while deadline
+variants wait with any possible returner, without inferring thread ownership.
+BudgetUnavailable requires provable absence of outstanding resources at the
+internal wait boundary. Public fixed-block acquisition in that state is normally
+ready (or fails the earlier feasibility check); a direct boundary probe tests
+no-returner refusal. Tests-first f27d4ae records the explicit try API regression.
+Positive deadline expiry with retained same-thread resources, spurious notification,
+unchanged slots/credits after timeout and reuse remain covered. A single-threaded
+consumer uses a deadline or try-acquire, not a presumed same-thread detector.
 
 Cold allocation is outside the mutex; a deterministic callback verifies try_lock
 and cancels during allocation, then checks claim rollback. Idle cancellation is
