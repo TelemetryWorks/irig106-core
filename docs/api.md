@@ -186,3 +186,39 @@ and compilation, with a 32 MiB peak-RSS ceiling. The input includes a complete
 for input parameters and negative control. These checks do not establish whole
 recording conformance, validate payload/checksum contents, or authorize release.
 The Trusted Publishing pipeline keeps publication separately authorized.
+
+## 0.2 development: storage primitives (slice 2)
+
+BlockPool::with_defaults() uses B = 256 MiB; new(bytes) is fallible. Construction
+reserves charged control descriptors, with zero 512 KiB payload blocks.
+BlockPool::try_begin(block_count) checks eventual feasibility without reserving
+payload and admits one BlockAssembly at a time. Explicit try_begin()/try_next_block()
+return WouldBlock on admission/credit contention. begin_until()/next_block_until()
+wait to an absolute deadline while a possible returner exists; spurious wakes
+recheck predicates. Expiry returns DeadlineExceeded without cancelling the pool
+or consuming an assembly slot. BudgetUnavailable is reserved for provable absence
+of outstanding returners, not inferred ownership/thread identity. Current public
+fixed-block acquisition normally has room, a possible returner, or an upfront
+BudgetTooSmall error; the no-returner guard protects the internal wait boundary.
+A single-threaded reader retaining earlier blocks uses a deadline or try-acquire.
+Readiness is checked before expiry; deadlines bound waiting, not I/O/allocation.
+try_next_block() or next_block_until() yields owned PooledBlock;
+storage_mut() is an initialized direct-read destination, not a valid packet view.
+Workers return blocks by Drop. Ordinary returns retain the warmed high-water set;
+trim_after_return(actual_packet_blocks) trims only above eight, and
+trim_for_pressure() explicitly trims idle storage to eight. The packet owner must
+call the former after returning that packet's actual storage, never from its P.
+Pool-wide cancel() is terminal, clears idle storage/credits and wakes both waits.
+Cold allocation/zeroing occurs outside the mutex with credits claimed first;
+cancellation or allocator failure rolls that claim back. At default B, control
+and lease charges leave at most 511 blocks, including idle and worker-held blocks.
+After a burst, idle storage can stay up to B (about 511 blocks / 256 MiB resident
+at defaults) until a large packet returns and its owner calls trim_after_return(),
+or trim_for_pressure() is called. Nothing trims automatically. Retention never
+exceeds the caller's accounted budget; choose a lower budget at construction or
+call trim for lower residency. Process/allocator overhead is outside this budget.
+PoolError
+preserves typed budget/allocation/synchronization failures; PoolStats is accounted
+storage, not RSS. No new dependencies or unsafe library code. See
+[slice-2 evidence](verification-v02-s02.md) for partial requirement coverage;
+these primitives do not yet supply packet admission, valid-byte assembly or I/O.

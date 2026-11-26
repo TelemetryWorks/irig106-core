@@ -28,6 +28,7 @@ mod error;
 mod header;
 mod inspection;
 mod integrity;
+mod pool;
 mod reader;
 mod sequence;
 
@@ -41,3 +42,7 @@ pub use integrity::{DataChecksumState, PacketRanges, SecondaryIntegrity};
 pub use irig106_types::Rtc;
 pub use reader::{Event, Packet, PacketReader, ReaderLimits, TailKind};
 pub use sequence::{SequenceKind, SequenceObservation};
+
+pub use pool::{
+    BLOCK_BYTES, BlockAssembly, BlockPool, DEFAULT_POOL_BUDGET, PoolError, PoolStats, PooledBlock,
+};

@@ -52,9 +52,9 @@ class WorkspaceContract(unittest.TestCase):
         ).splitlines()
         expected = {".cargo_vcs_info.json", "Cargo.toml", "Cargo.toml.orig", "Cargo.lock", "README.md", "LICENSE"}
         expected.update(f"src/{name}.rs" for name in
-                        ["lib", "header", "reader", "error", "integrity", "inspection", "sequence"])
+                        ["lib", "header", "reader", "error", "integrity", "inspection", "sequence", "pool"])
         expected.update(f"tests/{name}.rs" for name in
-                        ["primary_header", "reader", "completion", "integrity", "inspection", "sequence"])
+                        ["primary_header", "reader", "completion", "integrity", "inspection", "sequence", "pool"])
         expected.update(["examples/inspect.rs", "examples/rss_probe.rs"])
         self.assertEqual(set(files), expected)
         self.assertEqual(
