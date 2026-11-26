@@ -116,7 +116,40 @@ fn main() -> Result<(), Box<dyn StdError>> {
         },
     )?;
     let mut buf = PacketBuf::new(pool.clone())?;
-    if case == "recovery" {
+    if case == "drain" {
+        let p = 64 * MIB as u32;
+        let source = Synthetic {
+            p,
+            count: 1,
+            kind: 9,
+            next: Some(true),
+            pos: 0,
+        };
+        let mut reader = WholePacketReader::stream(
+            source,
+            WholePolicy::new().with_hard_limit(MIB as u32),
+            pool.clone(),
+        )?;
+        checkpoint("cold", &pool)?;
+        let Some(DrainEvent::Report(d)) = reader.drain_next(deadline())? else {
+            panic!("drain report")
+        };
+        assert_eq!(
+            (d.requested_bytes, d.consumed_bytes),
+            (u64::from(p), u64::from(p))
+        );
+        assert_eq!(d.disposition, DrainDisposition::Drained);
+        assert!(matches!(d.reason, DrainReason::HardLimit { .. }));
+        assert_eq!(pool.stats()?.allocated_blocks, 0);
+        checkpoint("drained", &pool)?;
+        assert!(matches!(
+            reader.next_packet_into(&mut buf, deadline())?,
+            Some(WholeEvent::Packet)
+        ));
+        assert_eq!(buf.info().unwrap().offset, u64::from(p));
+        checkpoint("resumed", &pool)?;
+        assert!(reader.next_packet_into(&mut buf, deadline())?.is_none());
+    } else if case == "recovery" {
         let gap = 48 * MIB as u64;
         let mut small = [0x5a; 28];
         small[..24].copy_from_slice(&header(28, 9));

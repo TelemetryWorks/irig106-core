@@ -497,3 +497,10 @@ are returnable and do not make later frame feasibility permanently fail. The nex
 approved feature is whole-mode incremental data-checksum verification, default ON
 with explicit opt-out, then reported drain and callback-scoped chunk delivery.
 Those features are not implemented by this coalescing PR; no release is implied.
+
+
+Explicit drain is now implemented separately from parked checksum PR #29; see
+[drain contract and evidence](verification-v02-drain.md). It is an explicit
+omission with fixed charged scratch, typed disposition/progress, cooperative
+cancellation/deadlines and no whole-admission or inventory credit. Callback chunk
+delivery remains the next separate implementation.

@@ -11,9 +11,9 @@ import tempfile
 import threading
 
 # Active pressure has B=16 MiB; allow 8 MiB for process/allocator/thread overhead.
-CASES = {"bogus": 12, "admit": 80, "setup": 144, "refuse": 12,
+CASES = {"drain": 12, "bogus": 12, "admit": 80, "setup": 144, "refuse": 12,
          "pressure-baseline": 12, "pressure": 16 + 8, "recovery": 12, "coalesce": 272}
-PHASES = {"coalesce": ["cold", "accepted", "coalesced", "trimmed"], "pressure-baseline": ["cold"], "bogus": ["cold", "short"], "admit": ["cold", "accepted", "trimmed"],
+PHASES = {"drain": ["cold", "drained", "resumed"], "coalesce": ["cold", "accepted", "coalesced", "trimmed"], "pressure-baseline": ["cold"], "bogus": ["cold", "short"], "admit": ["cold", "accepted", "trimmed"],
           "setup": ["cold", "accepted", "trimmed"], "refuse": ["cold", "refused"],
           "pressure": ["cold", "blocked", "trimmed"], "recovery": ["cold", "recovered", "tail"]}
 
@@ -37,8 +37,10 @@ def validate(sample, memory_kib, ceiling_kib):
         assert blocks == 256 and coalesced > 128 * 1024 * 1024, sample
     else:
         assert coalesced == 0, sample
-    if phase in ["cold", "refused"]:
+    if phase in ["cold", "refused", "drained"]:
         assert blocks == 0, sample
+    elif phase == "resumed":
+        assert blocks == 1 and idle == 0, sample
     elif phase in ["short", "recovered", "tail"]:
         assert blocks <= 1, sample
     elif phase == "blocked":

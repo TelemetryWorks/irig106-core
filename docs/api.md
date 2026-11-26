@@ -389,3 +389,23 @@ next_block_until, coalesce_until never waits for credits: _until bounds only the
 copy, and shortage returns WouldBlock immediately; no try_ variant is needed. Deadlines/cancellation are cooperative between bounded copies,
 not inside allocation/page faults. PoolStats::coalesced_bytes are returnable live
 credits, included in used_bytes and released after storage. See [evidence](verification-v02-coalescing.md).
+
+
+### Explicit omission with drain
+
+`WholePacketReader::drain_next(deadline)` returns DrainEvent::Report with offset,
+header/declared ranges, requested/consumed frame bytes, recovery, reason and
+Drained/Truncated disposition. Errors return DrainError with typed error and an
+Aborted report when a header was available. Header-finding tails remain separate
+DrainEvent::Tail. No PacketInfo, successful chunk End or inventory observation.
+
+This explicit call consumes a declared remainder even above H/B/target whole
+limits, using fixed charged scratch with no packet credits or assembly wait.
+It does not corroborate or authorize whole delivery; contents stay unverified.
+Normal next_packet_into never falls back or resumes after a refusal. Interrupted
+retries preserve progress; deadlines/cancellation are cooperative including
+recovery. Source mutation, I/O error, deadline, cancellation and truncation are
+terminal. No body rescan or silent prefix. A complete omission establishes framing
+for EOF/tail handling only. Mark unfiltered inventory incomplete and invalidate
+omitted setup/time context as appropriate. See [streaming contract](streaming.md)
+and [drain evidence](verification-v02-drain.md). Chunk delivery remains pending.

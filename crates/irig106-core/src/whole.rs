@@ -10,6 +10,8 @@ use std::{
     mem,
     time::Instant,
 };
+mod drain;
+pub use drain::{DrainDisposition, DrainError, DrainEvent, DrainReason, DrainReport};
 const QUANTUM: usize = 4096;
 /// Complete-frame routing and admission evidence; never a payload interpretation.
 #[derive(Debug, Clone)]

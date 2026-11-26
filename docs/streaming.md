@@ -68,12 +68,39 @@ ExactEof authorization require the adapter's stability contract. UDP needs bound
 transport reassembly, ordering and loss policy outside core; a datagram boundary
 is not a core packet boundary.
 
-## Optional incremental delivery: contract, not an implemented API
+## Explicit drain implementation
+
+`reader.drain_next(absolute_deadline)` explicitly omits the next structurally
+framed packet. It never happens as a fallback from next_packet_into, whose
+refusals remain terminal. DrainReport records the validated header/declared ranges,
+requested/actually consumed frame bytes (including primary, excluding recovery),
+reason and Drained/Truncated disposition. DrainError retains typed Error and an
+Aborted progress report when a valid header was available. Framing tails stay
+separate DrainEvent::Tail events. All evidence types are non-exhaustive.
+
+Drain uses fixed 4 KiB scratch already charged at reader construction, with no
+packet blocks or assembly permit. It can discard above H/B and on 32-bit targets
+without sizing storage from P. It reports the whole-delivery refusal reason but
+performs no whole-admission/corroboration or checksum-content verification.
+Cancellation/deadlines cover recovery and Interrupted retries cooperatively;
+blocking transport I/O still needs adapter-level bounds. Source mutation aborts.
+A completed drain resumes only at the declared boundary; errors/EOF terminate
+without searching the body for sync. Completed drain establishes framing only.
+
+Every report is an explicit omission, never PacketInfo or an ordinary inventory
+observation. Stop/mark incomplete any unfiltered Inspection; later packets belong
+to a separately declared retained scope, not a complete-recording inventory.
+Omitted setup/time may invalidate orchestrator context; no setup closure or time
+continuity may be inferred from draining their headers. Drained payload bytes
+cannot enter worker queues. See [drain verification](verification-v02-drain.md).
+
+## Optional incremental chunk delivery: contract, not an implemented API
 
 Whole-packet delivery remains the default. L2-WHOLE-008's approved drain/chunk
 options are explicit modes, never automatic fallbacks from H/B refusal, allocation
 failure or deadline expiry. The following names describe protocol concepts, not
-new public Rust types/methods; this slice implements no chunk/drain entry point.
+new chunk Rust types/methods. Explicit drain is implemented above; chunk delivery
+remains outstanding.
 
 - **Begin** follows primary structural validation and explicit admission. Carry
   packet identity/absolute offset, declared frame and DATA ranges, edition/limits,
@@ -107,7 +134,7 @@ wait, temporary pressure observes cancellation/deadlines. Output/context credits
 must not form a cycle with input credits. The existing whole-packet API and 0.1
 capture semantics remain unchanged.
 
-Future executable chunk/drain coverage must pin byte/range continuity, no commit
+Future executable chunk coverage must pin byte/range continuity, no commit
 on every abort class, explicit disposition and early-stop accounting, source
 mutation, bounded chunk retention, deadlines and merger backpressure. These are
 outstanding implementation/qualification obligations, not passing checks here.
