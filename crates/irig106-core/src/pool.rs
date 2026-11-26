@@ -372,6 +372,21 @@ mod tests {
         assert_eq!(pool.stats().unwrap().allocated_blocks, 1);
     }
     #[test]
+    fn cancel_clears_idle_blocks_and_credits() {
+        let pool = BlockPool::with_defaults().unwrap();
+        let fixed = pool.stats().unwrap().used_bytes;
+        let mut a = pool.begin(2).unwrap();
+        let blocks = [a.next_block().unwrap(), a.next_block().unwrap()];
+        drop(a); drop(blocks);
+        assert_eq!(pool.stats().unwrap().idle_blocks, 2);
+        pool.cancel().unwrap();
+        let cancelled = pool.stats().unwrap();
+        assert_eq!((cancelled.allocated_blocks, cancelled.idle_blocks), (0, 0));
+        assert_eq!(cancelled.used_bytes, fixed);
+        pool.cancel().unwrap();
+        assert_eq!(pool.stats().unwrap().used_bytes, fixed);
+    }
+    #[test]
     fn poison_is_typed_and_destructors_do_not_panic() {
         let pool = BlockPool::with_defaults().unwrap();
         let mut assembly = pool.begin(1).unwrap();

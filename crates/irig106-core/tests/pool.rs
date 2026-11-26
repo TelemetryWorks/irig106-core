@@ -4,8 +4,8 @@ use std::{
     alloc::{GlobalAlloc, Layout, System},
     cell::Cell,
     sync::{
-        Arc, Barrier, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed},
+        mpsc::sync_channel,
     },
     thread,
     time::{Duration, Instant},
@@ -60,75 +60,82 @@ fn waiting(pool: &BlockPool, count: usize) {
         thread::yield_now();
     }
 }
+fn joined<T>(handle: thread::JoinHandle<T>) -> T {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !handle.is_finished() {
+        assert!(Instant::now() < deadline, "worker did not complete in time");
+        thread::yield_now();
+    }
+    handle.join().unwrap()
+}
 fn burst(pool: &BlockPool) {
     let warm_admission = pool.begin(1).unwrap();
-    let warm_ready = Arc::new(Barrier::new(5));
-    let slots = Arc::new(Mutex::new(std::array::from_fn::<_, 16, _>(|_| None)));
-    let start = Arc::new(Barrier::new(5));
-    let release = Arc::new(Barrier::new(5));
-    let returned = Arc::new(Barrier::new(5));
-    let finish = Arc::new(Barrier::new(5));
-    thread::scope(|scope| {
-        for worker in 0..4 {
-            let (slots, start, release, returned, finish) = (
-                slots.clone(),
-                start.clone(),
-                release.clone(),
-                returned.clone(),
-                finish.clone(),
+    let (done, completed) = sync_channel(4);
+    let (mut inputs, mut releases, mut workers) = (Vec::new(), Vec::new(), Vec::new());
+    for _ in 0..4 {
+        let (tx, rx) = sync_channel::<irig106_core::PooledBlock>(4);
+        let (release, go) = sync_channel(1);
+        inputs.push(tx);
+        releases.push(release);
+        let (pool, done) = (pool.clone(), done.clone());
+        workers.push(thread::spawn(move || {
+            drop(
+                pool.begin_until(1, Instant::now() + Duration::from_secs(5))
+                    .unwrap(),
             );
-            let warm_ready = warm_ready.clone();
-            scope.spawn(move || {
-                drop(pool.begin(1).unwrap());
-                warm_ready.wait();
-                for _ in 0..3 {
-                    start.wait();
-                    let blocks: [irig106_core::PooledBlock; 4] = {
-                        let mut slots = slots.lock().unwrap();
-                        std::array::from_fn(|i| slots[4 * worker + i].take().unwrap())
-                    };
-                    release.wait();
-                    measured(|| drop(blocks));
-                    returned.wait();
-                }
-                finish.wait();
+            done.send(()).unwrap();
+            for _ in 0..3 {
+                let blocks: [_; 4] =
+                    std::array::from_fn(|_| rx.recv_timeout(Duration::from_secs(5)).unwrap());
+                go.recv_timeout(Duration::from_secs(5)).unwrap();
+                measured(|| drop(blocks));
+                done.send(()).unwrap();
+            }
+            go.recv_timeout(Duration::from_secs(5)).unwrap();
+        }));
+    }
+    waiting(pool, 4);
+    drop(warm_admission);
+    for _ in 0..4 {
+        completed.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+    for round in 0..3 {
+        if round == 1 {
+            TOTAL.store(0, Relaxed);
+            ALLOCS.store(0, Relaxed);
+            COUNT.store(true, Relaxed);
+        }
+        for index in 0..16 {
+            let block = measured(|| {
+                let mut assembly = pool.begin(1).unwrap();
+                let mut block = assembly.next_block().unwrap();
+                block.storage_mut()[0] = index as u8;
+                block
             });
+            inputs[index % 4].send(block).unwrap();
         }
-        waiting(pool, 4);
-        drop(warm_admission);
-        warm_ready.wait();
-        for round in 0..3 {
-            if round == 1 {
-                TOTAL.store(0, Relaxed);
-                ALLOCS.store(0, Relaxed);
-                COUNT.store(true, Relaxed);
-            }
-            {
-                let mut slots = slots.lock().unwrap();
-                for index in 0..16 {
-                    measured(|| {
-                        let mut assembly = pool.begin(1).unwrap();
-                        let mut block = assembly.next_block().unwrap();
-                        block.storage_mut()[0] = index as u8;
-                        slots[index] = Some(block);
-                    });
-                }
-            }
-            start.wait();
-            release.wait();
-            returned.wait();
+        for release in &releases {
+            release.send(()).unwrap();
         }
-        COUNT.store(false, Relaxed);
-        let allocations = ALLOCS.load(Relaxed);
-        finish.wait();
-        assert_eq!(
-            allocations,
-            0,
-            "pool reallocated after warm-up; process/harness allocations: {}",
-            TOTAL.load(Relaxed)
-        );
-        assert_eq!(pool.stats().unwrap().idle_blocks, 16);
-    });
+        for _ in 0..4 {
+            completed.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+    }
+    COUNT.store(false, Relaxed);
+    let allocations = ALLOCS.load(Relaxed);
+    for release in releases {
+        release.send(()).unwrap();
+    }
+    for worker in workers {
+        joined(worker);
+    }
+    assert_eq!(
+        allocations,
+        0,
+        "pool reallocated after warm-up; process/harness allocations: {}",
+        TOTAL.load(Relaxed)
+    );
+    assert_eq!(pool.stats().unwrap().idle_blocks, 16);
 }
 // One test keeps global allocation instrumentation isolated from other tests.
 #[test]
@@ -192,39 +199,55 @@ fn bounded_pool_ownership_pressure_cancellation_and_burst_hysteresis() {
         small.begin(2),
         Err(PoolError::BudgetTooSmall { .. })
     ));
-    thread::scope(|scope| {
-        let next = scope.spawn(|| small.begin(1));
-        waiting(&small, 1); // Exclusive assembly admission must wait.
-        drop(first);
-        let mut next = next.join().unwrap().unwrap();
-        let checkout = scope.spawn(move || next.next_block());
-        waiting(&small, 1); // Worker owns the only block; budget cannot grow.
-        assert!(small.stats().unwrap().used_bytes <= BLOCK_BYTES + 4096);
-        drop(block);
-        drop(checkout.join().unwrap().unwrap());
-    });
+    assert!(matches!(small.begin(1), Err(PoolError::BudgetUnavailable)));
+    let next_pool = small.clone();
+    let next =
+        thread::spawn(move || next_pool.begin_until(1, Instant::now() + Duration::from_secs(3)));
+    waiting(&small, 1);
+    drop(first);
+    let mut next = joined(next).unwrap();
+    // No helper exists on this thread to release the earlier block: do not wait.
+    assert!(matches!(
+        next.next_block(),
+        Err(PoolError::BudgetUnavailable)
+    ));
+    assert_eq!(small.stats().unwrap().waiting, 0);
+    let checkout =
+        thread::spawn(move || next.next_block_until(Instant::now() + Duration::from_secs(3)));
+    waiting(&small, 1);
+    assert!(small.stats().unwrap().used_bytes <= BLOCK_BYTES + 4096);
+    drop(block);
+    drop(joined(checkout).unwrap());
     let admission = BlockPool::with_defaults().unwrap();
     let owner = admission.begin(1).unwrap();
-    thread::scope(|scope| {
-        let pending = scope.spawn(|| admission.begin(1));
-        waiting(&admission, 1);
-        admission.cancel().unwrap();
-        assert!(matches!(pending.join().unwrap(), Err(PoolError::Cancelled)));
-    });
+    assert!(matches!(
+        admission.begin_until(1, Instant::now()),
+        Err(PoolError::DeadlineExceeded)
+    ));
+    let p = admission.clone();
+    let pending = thread::spawn(move || p.begin_until(1, Instant::now() + Duration::from_secs(3)));
+    waiting(&admission, 1);
+    admission.cancel().unwrap();
+    assert!(matches!(joined(pending), Err(PoolError::Cancelled)));
     drop(owner);
     let mut held = small.begin(1).unwrap();
     let block = held.next_block().unwrap();
     drop(held);
-    thread::scope(|scope| {
-        let pending = scope.spawn(|| {
-            let mut a = small.begin(1)?;
-            a.next_block()
-        });
-        waiting(&small, 1);
-        small.cancel().unwrap();
-        assert!(matches!(pending.join().unwrap(), Err(PoolError::Cancelled)));
+    let p = small.clone();
+    let pending = thread::spawn(move || {
+        let mut a = p.begin(1)?;
+        a.next_block_until(Instant::now() + Duration::from_secs(3))
     });
+    waiting(&small, 1);
+    small.cancel().unwrap();
+    assert!(matches!(joined(pending), Err(PoolError::Cancelled)));
     drop(block);
     assert!(matches!(small.begin(1), Err(PoolError::Cancelled)));
     assert_eq!(small.stats().unwrap().allocated_blocks, 0);
+    // Cancel must clear idle storage as well as outstanding-return handling.
+    assert_eq!(pool.stats().unwrap().idle_blocks, 8);
+    pool.cancel().unwrap();
+    let cleared = pool.stats().unwrap();
+    assert_eq!((cleared.idle_blocks, cleared.allocated_blocks), (0, 0));
+    assert_eq!(cleared.used_bytes, cold.used_bytes);
 }
