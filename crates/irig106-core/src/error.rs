@@ -234,6 +234,22 @@ impl From<PoolError> for ErrorKind {
 mod tests {
     use super::*;
     #[test]
+    fn terminal_pool_failures_do_not_request_io_retry() {
+        for (source, expected) in [
+            (PoolError::Cancelled, io::ErrorKind::Other),
+            (PoolError::BudgetUnavailable, io::ErrorKind::Other),
+            (PoolError::WouldBlock, io::ErrorKind::WouldBlock),
+            (PoolError::DeadlineExceeded, io::ErrorKind::TimedOut),
+        ] {
+            let error = Error {
+                reason: ErrorKind::Pool { source },
+                position: 24,
+                recovery: None,
+            };
+            assert_eq!(error.kind(), expected);
+        }
+    }
+    #[test]
     fn every_error_reason_has_human_display() {
         for (reason, text) in [
             (

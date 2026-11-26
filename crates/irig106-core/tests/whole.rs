@@ -685,3 +685,247 @@ fn truncated_large_assembly_returns_and_trims_its_partial_block_too() {
     assert_eq!(pool.stats().unwrap().idle_blocks, 8);
     assert!(buf.info().is_none());
 }
+
+struct Counted<R> {
+    input: R,
+    calls: usize,
+}
+impl<R: Read> Read for Counted<R> {
+    fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
+        self.calls += 1;
+        self.input.read(b)
+    }
+}
+#[test]
+fn recovery_uses_chunk_reads_and_preserves_prefetched_frames_and_tail_counts() {
+    let pool = BlockPool::with_defaults().unwrap();
+    let mut buf = PacketBuf::new(pool.clone()).unwrap();
+    let mut bytes = vec![0x55; 100_000];
+    bytes.extend(frame(28, 0, 9, 0));
+    bytes.extend(frame(28, 1, 9, 0));
+    bytes.extend([0x44; 31]);
+    let mut r = WholePacketReader::stream(
+        Counted {
+            input: Cursor::new(bytes),
+            calls: 0,
+        },
+        WholePolicy::new(),
+        pool,
+    )
+    .unwrap();
+    r.next_packet_into(&mut buf, deadline()).unwrap();
+    assert_eq!(buf.info().unwrap().recovered_bytes, 100_000);
+    assert_eq!(buf.info().unwrap().offset, 100_000);
+    assert_eq!(buf.contiguous().unwrap(), frame(28, 0, 9, 0));
+    r.next_packet_into(&mut buf, deadline()).unwrap();
+    assert_eq!(buf.info().unwrap().offset, 100_028);
+    assert_eq!(buf.info().unwrap().recovered_bytes, 0);
+    assert!(matches!(
+        r.next_packet_into(&mut buf, deadline()).unwrap(),
+        Some(WholeEvent::Tail {
+            tail: Tail {
+                offset: 100_056,
+                bytes: 31,
+                kind: TailKind::Unsynchronized,
+                ..
+            },
+            ..
+        })
+    ));
+    let calls = r.into_inner().calls;
+    println!("100 KB recovery: {calls} Read calls");
+    assert!(calls < 32, "recovery made {calls} calls");
+}
+#[test]
+fn ordinary_maximum_body_is_not_split_into_artificial_io_quanta() {
+    let pool = BlockPool::with_defaults().unwrap();
+    let mut buf = PacketBuf::new(pool.clone()).unwrap();
+    let mut r = WholePacketReader::stream(
+        Counted {
+            input: Cursor::new(frame(524_288, 0, 9, 0)),
+            calls: 0,
+        },
+        WholePolicy::new(),
+        pool,
+    )
+    .unwrap();
+    r.next_packet_into(&mut buf, deadline()).unwrap();
+    assert_eq!(r.into_inner().calls, 2);
+}
+struct Observed {
+    input: Cursor<Vec<u8>>,
+    size: u64,
+    reads: usize,
+    stamps: usize,
+    change_on_second_stamp: bool,
+}
+impl Read for Observed {
+    fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
+        self.reads += 1;
+        self.input.read(b)
+    }
+}
+impl Seek for Observed {
+    fn seek(&mut self, p: SeekFrom) -> io::Result<u64> {
+        self.input.seek(p)
+    }
+}
+impl StableSource for Observed {
+    fn source_stamp(&mut self) -> io::Result<SourceStamp> {
+        self.stamps += 1;
+        Ok(SourceStamp::new(
+            self.size,
+            1,
+            u128::from(self.change_on_second_stamp && self.stamps >= 2),
+        ))
+    }
+}
+#[test]
+fn frame_feasibility_precedes_both_probe_and_known_short_drain() {
+    for short in [false, true] {
+        let pool = BlockPool::new(BLOCK_BYTES + 65536).unwrap();
+        let mut buf = PacketBuf::new(pool.clone()).unwrap();
+        let mut bytes = frame(524_292, 0, 9, 0);
+        if short {
+            bytes.truncate(24);
+        } else {
+            bytes.extend(frame(28, 0, 9, 0));
+        }
+        let size = bytes.len() as u64;
+        let mut r = WholePacketReader::seek_checked(
+            Observed {
+                input: Cursor::new(bytes),
+                size,
+                reads: 0,
+                stamps: 0,
+                change_on_second_stamp: false,
+            },
+            WholePolicy::new(),
+            pool,
+        )
+        .unwrap();
+        assert!(matches!(
+            r.next_packet_into(&mut buf, deadline()).unwrap_err().reason,
+            ErrorKind::Pool {
+                source: PoolError::BudgetTooSmall { .. },
+                ..
+            }
+        ));
+        assert_eq!(r.position(), 24);
+        let source = r.into_inner();
+        assert_eq!(source.reads, 1);
+        assert_eq!(source.stamps, 0);
+    }
+}
+#[test]
+fn growth_beyond_an_unchanged_stamp_is_source_changed() {
+    let pool = BlockPool::with_defaults().unwrap();
+    let mut buf = PacketBuf::new(pool.clone()).unwrap();
+    let mut r = WholePacketReader::seek_checked(
+        Observed {
+            input: Cursor::new(frame(28, 0, 9, 0)),
+            size: 24,
+            reads: 0,
+            stamps: 0,
+            change_on_second_stamp: false,
+        },
+        WholePolicy::new(),
+        pool,
+    )
+    .unwrap();
+    assert!(matches!(
+        r.next_packet_into(&mut buf, deadline()).unwrap_err().reason,
+        ErrorKind::Admission {
+            source: AdmissionError::SourceChanged,
+            ..
+        }
+    ));
+    assert_eq!(r.position(), 28);
+    assert!(buf.info().is_none());
+}
+#[test]
+fn exact_eof_mutation_between_snapshots_is_refused_before_body_storage() {
+    let pool = BlockPool::with_defaults().unwrap();
+    let mut buf = PacketBuf::new(pool.clone()).unwrap();
+    let mut r = WholePacketReader::seek_checked(
+        Observed {
+            input: Cursor::new(frame(524_292, 0, 9, 0)),
+            size: 524_292,
+            reads: 0,
+            stamps: 0,
+            change_on_second_stamp: true,
+        },
+        WholePolicy::new(),
+        pool.clone(),
+    )
+    .unwrap();
+    assert!(matches!(
+        r.next_packet_into(&mut buf, deadline()).unwrap_err().reason,
+        ErrorKind::Admission {
+            source: AdmissionError::SourceChanged,
+            ..
+        }
+    ));
+    assert_eq!(r.position(), 24);
+    assert_eq!(pool.stats().unwrap().block_allocations, 0);
+}
+#[test]
+#[ignore = "bounded warm-cache file throughput evidence, explicit CI run"]
+fn bounded_file_read_benchmark() {
+    use std::{
+        fs::{File, OpenOptions},
+        io::Write,
+        time::SystemTime,
+    };
+    struct Temp(std::path::PathBuf);
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let path = Temp(std::env::temp_dir().join(format!(
+            "irig106-core-{}-{}.bench",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )));
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&path.0)
+        .unwrap();
+    let large = frame(524_288, 0, 9, 0);
+    let small = frame(28, 0, 9, 0);
+    for _ in 0..16 {
+        file.write_all(&large).unwrap();
+        file.write_all(&small).unwrap();
+    }
+    drop(file);
+    let bytes = std::fs::metadata(&path.0).unwrap().len();
+    let pool = BlockPool::with_defaults().unwrap();
+    let mut buf = PacketBuf::new(pool.clone()).unwrap();
+    let mut r = WholePacketReader::stream(
+        Counted {
+            input: File::open(&path.0).unwrap(),
+            calls: 0,
+        },
+        WholePolicy::new(),
+        pool,
+    )
+    .unwrap();
+    let start = Instant::now();
+    let mut packets = 0;
+    while let Some(event) = r.next_packet_into(&mut buf, deadline()).unwrap() {
+        assert!(matches!(event, WholeEvent::Packet));
+        packets += 1;
+    }
+    let seconds = start.elapsed().as_secs_f64();
+    let calls = r.into_inner().calls;
+    println!(
+        "bounded warm-cache file: {packets} packets, {bytes} bytes, {calls} Read calls, {:.1} packets/s, {:.1} MB/s",
+        packets as f64 / seconds,
+        bytes as f64 / seconds / 1e6
+    );
+}
