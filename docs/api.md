@@ -186,3 +186,20 @@ and compilation, with a 32 MiB peak-RSS ceiling. The input includes a complete
 for input parameters and negative control. These checks do not establish whole
 recording conformance, validate payload/checksum contents, or authorize release.
 The Trusted Publishing pipeline keeps publication separately authorized.
+
+## 0.2 development: storage primitives (slice 2)
+
+BlockPool::with_defaults() uses B = 256 MiB; new(bytes) is fallible. Construction
+reserves charged control descriptors, with zero 512 KiB payload blocks.
+BlockPool::begin(block_count) checks eventual feasibility without reserving payload
+and admits one BlockAssembly at a time. next_block() yields owned PooledBlock;
+storage_mut() is an initialized direct-read destination, not a valid packet view.
+Workers return blocks by Drop. Ordinary returns retain the warmed high-water set;
+trim_after_return(actual_packet_blocks) trims only above eight, and
+trim_for_pressure() explicitly trims idle storage to eight. The packet owner must
+call the former after returning that packet's actual storage, never from its P.
+Pool-wide cancel() is terminal and wakes admission/check-out waits. PoolError
+preserves typed budget/allocation/synchronization failures; PoolStats is accounted
+storage, not RSS. No new dependencies or unsafe library code. See
+[slice-2 evidence](verification-v02-s02.md) for partial requirement coverage;
+these primitives do not yet supply packet admission, valid-byte assembly or I/O.

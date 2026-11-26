@@ -172,7 +172,7 @@ reader, worker or channel. Acquire/initialize blocks only on actual demand under
 the provisional-block rule below; never populate eight blocks merely to reach
 the baseline. Ordinary returns do **not** trim at eight: retain the warmed
 high-water working set under B. Trim toward eight only when storage from a
-large assembly (more than eight blocks) returns, or under explicit budget
+large assembly (more than eight actual blocks) returns, or under explicit budget
 pressure; pressure may release more, down to zero. This hysteresis avoids
 allocation churn when a multi-worker pipeline swings by more than eight blocks. Live worker-owned blocks are
 not idle and remain charged until returned. Keep metadata/control overhead
@@ -361,3 +361,12 @@ After this owner-alignment docs PR merges: (2) budget/storage primitives, 512 Ki
 optional streaming contract; (7) RSS/allocation/platform controls and performance
 comparison. Keep each review around 300–600 lines; split rather than omit tests.
 No SIMD/async/no_std/publishing work is authorized by this design.
+
+## Slice 2 implementation boundary
+
+[Slice-2 evidence](verification-v02-s02.md) covers the shared block pool and
+exclusive assembly/storage permits. Ordinary block Drop only recycles; the
+future packet owner calls trim_after_return with its actual returned block count,
+not the declared length. Counts above eight trim; an explicit pressure call is
+the other trigger. Whole-packet assembly/valid-byte views, hard/soft admission,
+source-stability checks, direct I/O and coalescing remain later slices.
