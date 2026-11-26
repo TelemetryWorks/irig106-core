@@ -83,3 +83,13 @@ short/odd tails and block-sized input. All-FF 1 MiB single spans exercise lane
 wraparound and wide reductions. Existing independent literal/oracle tests remain.
 The requested <10% cost at 64/512 KiB is a measurement target, not a claimed
 result: current exact-head numbers and any remaining gap are reported in the PR.
+
+
+Benchmark guard follow-up: each timed packet contributes to a fixed outcome mask,
+then assertions outside the timed interval require exclusively Verified for ON,
+NotChecked for OFF, or Absent for checksum-free strategy fixtures. No outcome
+history allocation or second pass. Before measurement, output records CPU model
+(or explicit unavailable evidence) and compile-time baseline/vector target flags,
+distinct from the runtime CPU's potentially wider ISA. Forced ON/OFF and corrupt
+fixture controls fail these assertions; mutations are discarded. Default policy
+is unchanged while the owner decides it.

@@ -44,7 +44,48 @@ fn small_body_read_strategy_benchmark() {
 fn data_checksum_cost_benchmark() {
     watchdog(Duration::from_secs(120), || read_benchmark_case(true));
 }
+fn machine_evidence() {
+    let model = std::fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .and_then(|raw| {
+            raw.lines()
+                .find_map(|line| {
+                    let (key, value) = line.split_once(':')?;
+                    matches!(key.trim(), "model name" | "Hardware" | "Processor")
+                        .then(|| value.trim().to_owned())
+                })
+                .or_else(|| {
+                    let fields: Vec<_> = raw
+                        .lines()
+                        .filter(|line| {
+                            line.starts_with("CPU implementer") || line.starts_with("CPU part")
+                        })
+                        .take(2)
+                        .collect();
+                    (!fields.is_empty()).then(|| fields.join("; "))
+                })
+        })
+        .unwrap_or_else(|| "unavailable (/proc/cpuinfo has no model)".to_owned());
+    macro_rules! features {
+        ($($feature:literal),* $(,)?) => {
+            [$(( $feature, cfg!(target_feature = $feature) )),*]
+                .into_iter().filter_map(|(name, enabled)| enabled.then_some(name)).collect::<Vec<_>>()
+        };
+    }
+    // Compile-time ISA flags, not the runtime CPU's potentially wider features.
+    let features = features!(
+        "fxsr", "sse", "sse2", "sse3", "ssse3", "sse4.1", "sse4.2", "avx", "avx2", "avx512f",
+        "avx512bw", "avx512dq", "avx512vl", "fma", "neon", "sve", "sve2"
+    );
+    println!(
+        "benchmark_machine arch={} os={} cpu_model={model}",
+        std::env::consts::ARCH,
+        std::env::consts::OS
+    );
+    println!("benchmark_target_features={features:?} (compile-time baseline/vector flags)");
+}
 fn read_benchmark_case(checksums: bool) {
+    machine_evidence();
     use std::{
         fs::{File, OpenOptions},
         io::{BufWriter, Write},
@@ -91,6 +132,7 @@ fn read_benchmark_case(checksums: bool) {
         buf: &mut PacketBuf,
         packets: usize,
         policy: WholePolicy,
+        expected_checksum: Option<bool>,
     ) -> Sample {
         let mut reader = WholePacketReader::stream(input, policy, pool.clone()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(60);
@@ -98,16 +140,35 @@ fn read_benchmark_case(checksums: bool) {
         let start = Instant::now();
         let mut seen = 0usize;
         let mut digest = 0usize;
+        let mut checksum_outcomes = 0u8;
         while let Some(event) = reader.next_packet_into(buf, deadline).unwrap() {
             assert!(matches!(event, WholeEvent::Packet));
             let bytes = std::hint::black_box(buf.contiguous().unwrap());
             digest = digest.wrapping_add(usize::from(bytes[0]));
-            std::hint::black_box(buf.info().unwrap().ranges.data_checksum);
+            // Retain a fixed outcome mask; assert after timing. Every measured
+            // packet must have exactly the requested state, with no extra pass
+            // or per-packet history allocation.
+            checksum_outcomes |=
+                match std::hint::black_box(buf.info().unwrap().ranges.data_checksum) {
+                    DataChecksumState::Absent => 1,
+                    DataChecksumState::NotChecked => 2,
+                    DataChecksumState::Verified { .. } => 4,
+                    _ => 8,
+                };
             seen += 1;
         }
         let seconds = start.elapsed().as_secs_f64();
         let after = kernel_reads();
         let kernel = before.zip(after).map(|(a, b)| b - a - 1);
+        assert_eq!(
+            checksum_outcomes,
+            match expected_checksum {
+                Some(true) => 4,  // Every ON packet Verified; no other outcome bit.
+                Some(false) => 2, // Every OFF packet NotChecked.
+                None => 1,        // Read-strategy fixtures declare no checksum.
+            },
+            "unexpected checksum outcome in measured packets"
+        );
         assert_eq!(seen, packets);
         assert_eq!(digest, packets * 0x25);
         let calls = count(reader.into_inner());
@@ -233,6 +294,7 @@ fn read_benchmark_case(checksums: bool) {
                         &mut buf,
                         packets,
                         policy,
+                        checksums.then_some(mode == 1),
                     );
                     batch[mode].seconds += sample.seconds;
                     batch[mode].calls += sample.calls;
