@@ -32,6 +32,13 @@ non-default explicit legacy setup allowance for type 0x01 on any channel.
 These are approved requirements, **not implemented or verified features**.
 Whole-packet slice 2 starts in a separate PR after this docs update merges.
 
+**Owner sign-off, 2026-11-25, answer A:** L2-ADM-008, L2-BUD-008 and
+L2-WHOLE-008 are approved in full, including reported opt-in drain/chunk modes
+(never default), capacity trimming and cancellable waits. The default PacketBuf
+is block-based; multi-block contiguous delivery is explicit coalescing under
+raised B. Owner performance direction is normative in L2-HOT-008: direct reads
+into final pooled blocks, no steady-state per-packet allocation, borrowed payloads.
+
 The existing 0.1 bounded-capture mode and its independent-of-declared-size rule
 are preserved, including the original mode-specific obligations:
 
@@ -61,6 +68,14 @@ B >= 2 x 128 MiB + overhead, or the consumer must read the complete spans.
 At default B, maximum-setup coalescing returns typed BudgetTooSmall without
 waiting, even after all other buffers are returned. Default H/B are unchanged.
 
+Choose **524,288-byte (512 KiB) blocks**, including headers/trailer. Packets with
+P <= 524,288 start at block offset zero, occupy one block and expose one contiguous
+slice without coalescing. Large setup packets use spans (256 blocks at 128 MiB).
+Only one fixed, budgeted provisional block may be provisioned for an upcoming
+body read; only bytes returned by Read become valid packet data. No speculative
+multi-block reservation from P is allowed. Cold initialized-block capacity is
+bounded granularity; logical growth still follows actual received bytes.
+
 ## L1: responsibilities
 
 | ID | Obligation | Source |
@@ -82,8 +97,8 @@ aggregate CLI requirement receives verification credit.
 | --- | --- | --- |
 | L2-HDR-001 | L1-CORE-001 | Require sync and primary word checksum at every packet offset; preserve channel, type/version, sequence, flags and raw RTC. |
 | L2-LEN-001 | L1-CORE-001 | Check 24/36-byte minimum, four-byte alignment, Data Length containment and overflow before trusting offsets or allocating. |
-| L2-IO-002 | L1-CORE-002 | Use safe, std-only synchronous buffered Read and fixed-size I/O scratch. For whole-packet delivery, acquire budget credits and fallibly extend storage only for received bytes in bounded quanta. Never preallocate from declared lengths, use mmap/unsafe, or retain a recording. Deliver a complete packet only after its entire declared frame has arrived. Preserve bounded capture as a separate compatible mode. |
-| L2-CAP-002 | L1-CORE-002 | Preserve the 0.1 DATA-prefix API and its explicit capture cap. The new default whole-packet API applies explicit edition soft thresholds, an absolute caller hard ceiling and aggregate budget; an over-soft packet requires corroboration or explicit stream opt-in. Refusal/drain/chunk disposition must be reported, never represented as an ordinary complete packet. |
+| L2-IO-002 | L1-CORE-002@whole-0.2 | Use safe, std-only synchronous buffered Read and fixed-size I/O scratch. For whole-packet delivery, acquire budget credits and fallibly extend storage only for received bytes in bounded quanta. Never preallocate from declared lengths, use mmap/unsafe, or retain a recording. Deliver a complete packet only after its entire declared frame has arrived. Preserve bounded capture as a separate compatible mode. |
+| L2-CAP-002 | L1-CORE-002@whole-0.2 | Preserve the 0.1 DATA-prefix API and its explicit capture cap. The new default whole-packet API applies explicit edition soft thresholds, an absolute caller hard ceiling and aggregate budget; an over-soft packet requires corroboration or explicit stream opt-in. Refusal/drain/chunk disposition must be reported, never represented as an ordinary complete packet. |
 | L2-REC-003 | L1-CORE-003 | Default recovery has no search cap and continues to EOF with bounded memory. Optional caller cap yields typed RecoveryLimit; report scanned bytes on every incident. |
 | L2-END-004 | L1-CORE-004 | No complete valid packet yields NoCompletePacket (CLI input3); after one, cut-final headers/packets and EOF padding remain tail evidence/findings. |
 | L2-ERR-004 | L1-CORE-004 | Propagate real I/O failures; reject impossible checksum-qualified lengths; preserve content-vs-structure distinction and prior events. |
@@ -100,9 +115,10 @@ aggregate CLI requirement receives verification credit.
 
 | ID | Parent | Required behavior |
 | --- | --- | --- |
-| L2-ADM-008 | L1-CORE-002, L1-CORE-004 | Default H = 134,217,728 bytes, caller-overridable. Apply explicit edition/type S. Above S, admit through NextHeader, stable Unconfirmed(ExactEof), or explicit StreamOptIn; retain authorization evidence. Enforce H/B/target limits in all cases. Setup S = 134,217,728 defaults to channel0/type01 only; non-default legacy_setup_any_channel explicitly extends it to type01 on other channels with evidence, never by inference. |
-| L2-BUD-008 | L1-CORE-002, L1-CORE-004 | Default shared B = 268,435,456 bytes, caller-overridable independently of H. Account for live/idle storage, metadata and growth workspace; grow only after real bytes arrive. A packet unable to fit the entire reclaimed B returns typed BudgetTooSmall or explicit reported drain, never waits. Temporary reclaimable pressure waits cancellably with deadlock-free ownership return; trim rare large capacity toward baseline. |
-| L2-WHOLE-008 | L1-CORE-002, L1-CORE-004 | Deliver one complete packet only after the declared frame arrives. On a seekable stable source, exact EOF admits an oversoft P <= H fitting B with Unconfirmed(ExactEof); recheck source identity/size before admission and after body consumption, returning SourceChanged on observed mutation. Declared end beyond EOF retains truncation-only handling. Drain/chunk modes are explicit, with provisional streaming evidence until completion. |
+| L2-ADM-008 | L1-CORE-002@whole-0.2, L1-CORE-004 | Default H = 134,217,728 bytes, caller-overridable. Apply explicit edition/type S. Above S, admit through NextHeader, stable Unconfirmed(ExactEof), or explicit StreamOptIn; retain authorization evidence. Enforce H/B/target limits in all cases. Setup S = 134,217,728 defaults to channel0/type01 only; non-default legacy_setup_any_channel explicitly extends it to type01 on other channels with evidence, never by inference. |
+| L2-BUD-008 | L1-CORE-002@whole-0.2, L1-CORE-004 | Default shared B = 268,435,456 bytes, caller-overridable independently of H. Account for live/idle storage, metadata and growth workspace; grow only after real bytes arrive. A packet unable to fit the entire reclaimed B returns typed BudgetTooSmall or explicit reported drain, never waits. Temporary reclaimable pressure waits cancellably with deadlock-free ownership return; trim rare large capacity toward baseline. |
+| L2-WHOLE-008 | L1-CORE-002@whole-0.2, L1-CORE-004 | Deliver one complete packet only after the declared frame arrives. On a seekable stable source, exact EOF admits an oversoft P <= H fitting B with Unconfirmed(ExactEof); recheck source identity/size before admission and after body consumption, returning SourceChanged on observed mutation. Declared end beyond EOF retains truncation-only handling. Drain/chunk modes are explicit, with provisional streaming evidence until completion. |
+| L2-HOT-008 | L1-CORE-002@whole-0.2 | Default 524,288-byte blocks include headers/trailer; every P <= 524,288 packet fits one block as a single contiguous borrowed slice. Read normal bodies directly into final pooled storage (one kernel-to-user copy on direct file/pipe sources), without input BufReader/scratch staging or a second body copy. Reuse warmed blocks and packet/segment descriptors for zero steady-state per-packet allocations; consumers borrow payloads. Provision at most one budgeted fixed block before a body read and advance valid length only by returned bytes; never allocate from declared P. |
 
 ## L3: verification obligations
 
@@ -135,6 +151,8 @@ source references are in [the design](design-0.2.md).
 
 | ID → L2 parent | Oracle and required probes |
 | --- | --- |
+| L3-BLOCK-008 → L2-HOT-008, L2-WHOLE-008 | Default block size is 524,288 bytes including all headers/trailer. Independent frames at small and maximum ordinary P, with/without secondary headers and each trailer width, occupy one block and expose their exact full bytes as one contiguous borrowed slice. An admitted P = 524,292 uses two blocks; maximum setup uses 256. No automatic coalescing. |
+| L3-HOT-008 → L2-HOT-008, L2-IO-002@whole-0.2, L2-BUD-008 | Instrument Read destinations to prove every body read targets the final pool block at its frame offset, never scratch/BufReader; short/Interrupted reads preserve this and never overread the frame. After pool/descriptor warm-up, allocation counting over many mixed ordinary packet sizes is zero (oracle storage preallocated). Borrow/lifetime checks reject owner reuse while views live. Cold EOF has at most one budgeted provisional block and no speculative P-sized request. |
 | L3-DEFAULT-008 → L2-ADM-008, L2-BUD-008 | Whole-packet new()/Default H = 134,217,728 and B = 268,435,456; independent builder overrides preserve the other setting; defaults do not allocate H/B or alter 0.1 ReaderLimits. Feasibility still includes workspace/pool. |
 | L3-EOF-008 → L2-ADM-008, L2-WHOLE-008 | Stable exact EOF admitted with precisely Unconfirmed(ExactEof), whole bytes and no next-header/stream-opt-in requirement; one byte short takes truncation-only path; identity replacement or size mutation before admission/after body returns SourceChanged with no packet. Missing stability evidence cannot authorize ExactEof. |
 | L3-LEGACY-008 → L2-ADM-008 | Default off: channel0/type01 selects setup S, nonzero/type01 retains ordinary S. Explicit opt-in selects setup S on nonzero/type01 and records LegacySetupAnyChannel evidence. Other types, arbitrary Data Type Versions and guessed editions never enable it. H/B overrides still apply. |

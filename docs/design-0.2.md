@@ -31,6 +31,14 @@ and L1-CORE-004. Tests below are L3 implementation obligations, **not passing
 checks**. No other clause, including uncapped default recovery, is relaxed.
 Owner approval of requirements does not authorize a release or publication.
 
+**Owner sign-off, 2026-11-25 (answer A to #17 item 7):** L2-ADM-008,
+L2-BUD-008 and L2-WHOLE-008 are approved **in full**, including explicit reported
+opt-in drain/chunk modes, capacity trimming and cancellable waits. Block-based
+PacketBuf is the approved default. Multi-block contiguous delivery requires
+explicit coalescing under a raised B; ordinary one-block packets are already
+contiguous. The direct-read/allocation/borrowing contract below is also an owner
+requirement, not a measured 0.2 performance claim.
+
 Planned API boundary: the shared PacketReader framing engine gains an explicit
 whole-packet mode configured with a non_exhaustive resource policy and shared
 budget handle. It returns PacketBuf ownership plus header/ranges/offset, soft
@@ -42,8 +50,8 @@ keep their contract. Exact method names are deferred to the implementation revie
 ## Limits and admission (L2-ADM-008)
 
 Let P be total Packet Length, S the edition/type soft threshold, H the caller's
-absolute hard ceiling, B aggregate budget and K fixed I/O quantum. All include
-explicit units; P includes headers/trailer, not just DATA. Built-in defaults are
+absolute hard ceiling, B aggregate budget and K bounded direct-read quantum.
+All include explicit units; P includes headers/trailer, not just DATA. Built-in defaults are
 **H = 128 MiB (134,217,728 bytes)** and **B = 256 MiB (268,435,456 bytes)**.
 Both are independently caller-overridable. H matches the largest packet allowed
 by the baseline standard (setup). **B fits one maximum 128 MiB setup packet
@@ -100,13 +108,15 @@ The built-in H admits the standard maximum; a lower caller override deliberately
 reduces that eligibility. No soft allowance overrides the absolute ceiling.
 
 SeekChecked computes offset+P with checked u64 arithmetic, seeks there through
-an exclusive buffered reader, and reads a fixed 24-byte candidate. Require sync,
+an exclusive source cursor, and reads a fixed 24-byte candidate. Require sync,
 primary checksum and the same structural header/range checks as normal framing.
 Return evidence NextHeader(offset), not a claim the following body is valid.
 Restore the **logical** body position on success/failure, invalidate stale
-read-ahead through BufReader::seek, and do not charge probe bytes to stream
-position/recovery counters. Restore/seek/read errors are typed terminal errors;
-never use File::try_clone assuming an independent file cursor. Interrupted is
+header/probe read-ahead, and do not charge probe bytes to stream
+position/recovery counters. Whole-packet mode seeks through the exclusive raw
+source; it must not add an input BufReader that stages body bytes. The existing
+0.1 buffered-capture path is unchanged. Restore/seek/read errors are typed
+terminal errors; never use File::try_clone assuming an independent file cursor. Interrupted is
 retried; short probes before the known EOF are uncorroborated. No seeking for
 non-seekable sources.
 
@@ -143,21 +153,61 @@ lookahead. Headers found during recovery obey exactly the same admission rules.
 ## Receive-driven storage and budget (L2-BUD-008 / L2-WHOLE-008)
 
 Default delivery is one owned complete packet; no partial body is dispatched.
-Use fixed scratch to obtain up to K real bytes; request storage only after n>0
-has arrived, append those n bytes fallibly, and repeat. Scratch, input buffering
-and one bounded read-ahead quantum are included in B. Never resize/zero P bytes
-or reserve P even if H would allow it. A short admitted input therefore grows
-with actual received bytes plus bounded allocation granularity, then yields a
-tail. Partial storage is released/recycled; preceding complete packets survive.
+**Default block size is 524,288 bytes (512 KiB), including packet headers and
+trailer**, independent of P. Every packet with P <= 524,288 starts at block offset
+zero and occupies exactly one block; its valid frame is one contiguous slice.
+Headers, secondary bytes, DATA, filler and checksum all fit that same block.
+Larger packets use multiple blocks; a maximum 128 MiB setup occupies 256 blocks.
+There is no automatic contiguous-only representation or multi-block coalescing.
+
+### Direct-read hot path (L2-HOT-008)
+
+Read each body directly from the unbuffered source into its final pooled block.
+For raw file/pipe input this targets one kernel-to-user payload copy: never read
+normal body bytes into input BufReader/scratch and then append/copy them into
+PacketBuf. The small fixed primary header may be copied into the first block;
+header/probe/recovery and explicit drain scratch are separate from the normal
+body path. Bound each read by K, the block's remaining space and remaining frame
+bytes, so it cannot prefetch another packet's body. Probes read only header bytes.
+Secondary/trailer reads also land at their final frame offsets.
+
+Acquire an existing initialized pool block (or fallibly provision one fixed block
+on a cold/exceptional path), charge its capacity before reading, and read into
+its final writable slice. Safe Read needs initialized destination storage; fixed
+block initialization is a bounded cold-path cost, never zeroing/reserving P.
+Only the returned n>0 bytes advance valid length. Acquire another block only
+when the current one is filled and more frame bytes are needed. At most one
+provisional block is available to the next read; EOF/error releases any unused
+block, and Interrupted retries without allocating another. This fixed-granularity
+allowance, including the initial block before the first body byte, is charged to
+B; a bogus large P cannot cause multiple blocks to be allocated speculatively.
+Logical packet growth follows actual arrivals, with at most one block of slack.
+
+Reuse blocks **and packet/segment descriptors**: after the bounded pool and
+metadata are warmed, the successful hot path has **zero per-packet allocations**.
+Consumers borrow DATA/frame slices or spans from the packet owner; do not clone
+payload vectors to hand them off. Borrow lifetimes prevent reuse while a view
+is live; moving packet ownership to workers does not copy its payload.
+Trimming a rare large record can make later growth a cold path again; do not
+claim allocation-free first use or arbitrary sustained large-record churn.
+
+The source adapter must actually support direct reads; an externally supplied
+Read may hide buffering/copies. No one-copy claim is made for such an adapter or
+UDP reassembly outside core. In L2-IO-002's whole-packet scope, buffering means
+final pooled storage and fixed scratch means framing/control/drain scratch,
+not a second body staging buffer. This does not alter 0.1 bounded capture.
+Small direct file reads may increase syscall overhead relative to buffered 0.1;
+benchmark calls, small-packet throughput and large-body bandwidth separately.
+The copy/allocation contract is mandatory, not a guaranteed speedup.
 
 A naive Vec::try_reserve(delta) is insufficient: growth may be geometric and a
 moving reallocation can transiently retain old and new allocations. Even
 [try_reserve_exact](https://doc.rust-lang.org/std/vec/struct.Vec.html#method.try_reserve_exact)
 permits allocator excess. Small exact contiguous increments can also repeatedly
 copy a large prefix. **Default implementation representation:** opaque PacketBuf
-with reusable bounded storage blocks, grown fallibly after bytes arrive, exposing
+with reusable fixed-size blocks, provisioned under the direct-read rules above, exposing
 a complete packet view only at completion. Metadata growth is budgeted too. One
-small packet normally occupies one reusable block; large packets occupy several.
+packet up to 524,288 bytes occupies one block; larger packets occupy several.
 Internal segmentation is not incremental delivery: workers receive one complete
 packet, with validated DATA ranges over its spans. This avoids a hidden 2P copy.
 
@@ -169,12 +219,15 @@ typed BudgetTooSmall **without waiting**, even with all other buffers returned;
 read the complete spans or explicitly raise B. The same conservative minimum
 applies to a contiguous-only Vec representation and its moving-growth workspace.
 In-place reallocation is not a portable guarantee that permits a smaller budget.
-A contiguous-only implementation still needs reviewed growth accounting and a
-benchmark comparison; there is no unsafe/unaccounted realloc shortcut.
+No contiguous-only reader mode is introduced: this Vec calculation is a cost
+comparison, not an alternative default or automatic fallback. Multi-block
+contiguous delivery is only explicit coalescing under raised B, outside the
+direct-read hot path; there is no unsafe/unaccounted realloc shortcut.
 
 Credits cover live storage capacity (not just length), idle slots, metadata and
 transient replacement/coalescing workspace. Charge bounded allocation quanta
-before allocating; touch/initialize only received bytes plus fixed scratch.
+before allocating; account for received bytes, the one provisional initialized
+block and fixed control scratch. Do not initialize a declared-length region.
 Allocator-visible excess must be reconciled before retaining a block; if credits
 are unavailable, drop it and return a typed allocation/budget error. Safe std Vec
 cannot promise that an allocator never transiently supplies excess: request-credit
@@ -243,7 +296,7 @@ NotChecked until a separate validation assignment.
 | Pool/backpressure | Budget charges workers and idle buffers; return/shrink releases credits. Inability to fit even with the entire budget reclaimed errors or explicitly drains immediately, never waits. Temporary pressure waits cancellably, never bypasses budget or deadlocks on pending ordered output. |
 | Interrupted/short reads | Retry Interrupted without resetting received bytes or budget credit; positive short reads append only n bytes; Ok(0) means EOF. PermissionDenied and other errors remain typed, terminal, and distinct from truncation. |
 | 32-bit | Keep offsets/length calculations checked in u64; checked conversions and isize/address-space limits before allocation. H/B/block counts must be representable. Segmentation does not justify unchecked usize arithmetic. Refuse unsupported configuration/packet with typed TargetLimit; no wrap or cast-based allocation. |
-| Linux overcommit/OOM | Fallible allocation catches reported allocator failure, not process kills on later page faults. Only received bytes are touched, plus bounded scratch/copy overhead. A genuinely huge arriving stream can still hit a badly configured host/cgroup limit; H/B require headroom. Never promise immunity from OOM-killer/global pressure. |
+| Linux overcommit/OOM | Fallible allocation catches reported allocator failure, not process kills on later page faults. Touch received bytes plus bounded fixed-block initialization and control/copy overhead, never a declared-length region. A genuinely huge arriving stream can still hit a badly configured host/cgroup limit; H/B require headroom. Never promise immunity from OOM-killer/global pressure. |
 | Windows commit charge | Heap allocation may consume commit before pages are resident. Incremental actual-byte allocation limits that request, but working-set RSS alone misses commit pressure. Measure private committed bytes too; failure may arrive earlier than on Linux. |
 | Edition maximum | Explicit edition policy supplies S; unknown editions/types need a caller policy or conservative ordinary S, with the raw uncertainty reported. A standard size violation is an admission finding, not an inferred edition or permission to allocate. |
 
@@ -255,6 +308,8 @@ No settings, overcommit policy or process limits are changed by this design.
 
 | Control | Oracle / falsifying regression |
 | --- | --- |
+| L3-BLOCK-008 | Default block size is 524,288 bytes including all headers/trailer. Independent frames at small and maximum ordinary P, with/without secondary headers and each trailer width, occupy one block and expose their exact full bytes as one contiguous borrowed slice. An admitted P = 524,292 uses two blocks; maximum setup uses 256. No automatic coalescing. |
+| L3-HOT-008 | Instrument Read destinations to prove every body read targets the final pool block at its frame offset, never scratch/BufReader; short/Interrupted reads preserve this and never overread the frame. After pool/descriptor warm-up, allocation counting over many mixed ordinary packet sizes is zero (oracle storage preallocated). Borrow/lifetime checks reject owner reuse while views live. Cold EOF has at most one budgeted provisional block and no speculative P-sized request. |
 | L3-DEFAULT-008 | Whole-packet new()/Default H = 134,217,728 and B = 268,435,456; independent builder overrides preserve the other setting; defaults do not allocate H/B or alter 0.1 ReaderLimits. Feasibility still includes workspace/pool. |
 | L3-EOF-008 | Stable exact EOF admitted with precisely Unconfirmed(ExactEof), whole bytes and no next-header/stream-opt-in requirement; one byte short takes truncation-only path; identity replacement or size mutation before admission/after body returns SourceChanged with no packet. Missing stability evidence cannot authorize ExactEof. |
 | L3-LEGACY-008 | Default off: channel0/type01 selects setup S, nonzero/type01 retains ordinary S. Explicit opt-in selects setup S on nonzero/type01 and records LegacySetupAnyChannel evidence. Other types, arbitrary Data Type Versions and guessed editions never enable it. H/B overrides still apply. |
@@ -269,7 +324,7 @@ All rows are implementation obligations, including true oversize acceptance;
 this docs-only update cannot pass them by measuring 0.1. Existing isolated RSS stays
 unchanged. Absolute OS survival cannot be unit-tested or promised.
 
-After this owner-alignment docs PR merges: (2) budget/storage primitives and accounting tests;
+After this owner-alignment docs PR merges: (2) budget/storage primitives, 512 KiB blocks and accounting/default tests;
 (3) admission/seek evidence and EOF tests; (4) incremental whole-packet reader;
 (5) pool reuse/trim and metadata inspection; (6) ordered consumer examples and
 optional streaming contract; (7) RSS/allocation/platform controls and performance
