@@ -369,3 +369,37 @@ fn whole_metadata_limits_and_terminal_status_preserve_prior_counts() {
         }
     });
 }
+
+#[test]
+fn whole_tail_consumer_keeps_unseen_facts_unknown() {
+    support::watchdog(std::time::Duration::from_secs(5), || {
+        use irig106_core::{BlockPool, PacketBuf, WholeEvent, WholePacketReader, WholePolicy};
+        use std::{
+            io::Cursor,
+            time::{Duration, Instant},
+        };
+        let pool = BlockPool::with_defaults().unwrap();
+        let mut buffer = PacketBuf::new(pool.clone()).unwrap();
+        let mut bytes = frame(1, 9, 4);
+        bytes.push(0x55);
+        let mut r =
+            WholePacketReader::stream(Cursor::new(bytes), WholePolicy::new(), pool).unwrap();
+        let mut inventory = Inspection::new(InspectionLimits::new(1, 1));
+        r.next_packet_into(&mut buffer, Instant::now() + Duration::from_secs(2))
+            .unwrap();
+        inventory
+            .observe_packet_info(buffer.info().unwrap())
+            .unwrap();
+        assert!(matches!(
+            r.next_packet_into(&mut buffer, Instant::now() + Duration::from_secs(2))
+                .unwrap(),
+            Some(WholeEvent::Tail { .. })
+        ));
+        assert!(buffer.info().is_none());
+        inventory.mark_incomplete();
+        inventory.finish();
+        assert_eq!(inventory.totals().packets, 1);
+        assert_eq!(inventory.status(), ScanStatus::Incomplete);
+        assert_eq!(inventory.presence().recording_index, Presence::Unknown);
+    });
+}

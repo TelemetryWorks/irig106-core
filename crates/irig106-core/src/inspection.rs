@@ -1,5 +1,5 @@
 //! Bounded header inventory. No payload bytes, packet history or diagnostics.
-use crate::{Event, Header, Packet, SequenceObservation};
+use crate::{Event, Header, PacketInfo, SequenceObservation};
 use std::{collections::BTreeMap, fmt};
 
 /// Explicit entry budgets; zero permits no entries. No preallocation occurs.
@@ -196,7 +196,9 @@ impl Inspection {
             Err(InspectionError::Stopped)
         } else {
             match event {
-                Event::Packet(p) => self.record(p).map(Some),
+                Event::Packet(p) => self
+                    .record(&p.header, p.offset, p.recovered_bytes)
+                    .map(Some),
                 Event::Tail { .. } => {
                     self.mark_incomplete();
                     Ok(None)
@@ -208,8 +210,31 @@ impl Inspection {
         }
         result
     }
-    fn record(&mut self, packet: &Packet) -> Result<SequenceObservation, InspectionError> {
-        let h = &packet.header;
+    /// Accept one complete whole-packet metadata view without copying payloads.
+    /// Feed every accepted frame exactly once, on the ordered reader path, before
+    /// returning/reusing its PacketBuf. Uses the existing explicit entry budgets.
+    /// Reader tails/errors/early stop require mark_incomplete; call finish only
+    /// on clean EOF. Do not also observe a capture event for the same frame.
+    pub fn observe_packet_info(
+        &mut self,
+        packet: &PacketInfo,
+    ) -> Result<SequenceObservation, InspectionError> {
+        let result = if self.status != ScanStatus::InProgress {
+            Err(InspectionError::Stopped)
+        } else {
+            self.record(&packet.header, packet.offset, packet.recovered_bytes)
+        };
+        if result.is_err() {
+            self.mark_incomplete();
+        }
+        result
+    }
+    fn record(
+        &mut self,
+        h: &Header,
+        offset: u64,
+        recovered_bytes: u64,
+    ) -> Result<SequenceObservation, InspectionError> {
         let key = (h.channel(), h.data_type());
         if !self.channels.contains_key(&key.0) && self.channels.len() >= self.limits.max_channels {
             return Err(InspectionError::ChannelLimit {
@@ -224,7 +249,7 @@ impl Inspection {
         // Compute every fallible value before changing any inventory state.
         let skipped_bytes = self
             .skipped_bytes
-            .checked_add(packet.recovered_bytes)
+            .checked_add(recovered_bytes)
             .ok_or(InspectionError::CountOverflow)?;
         let totals = self.totals.after(h)?;
         let type_counts = self.types[key.1 as usize].after(h)?;
@@ -239,10 +264,10 @@ impl Inspection {
         let previous = self.channels.get(&key.0);
         let sequence = SequenceObservation {
             channel: key.0,
-            offset: packet.offset,
+            offset,
             previous: previous.map(|s| s.last),
             observed: h.sequence(),
-            recovered_bytes: packet.recovered_bytes,
+            recovered_bytes,
             skipped_since_previous: previous.map_or(0, |s| skipped_bytes - s.skipped_checkpoint),
         };
         self.channels.insert(
@@ -259,7 +284,7 @@ impl Inspection {
         self.seen[0] |= key == (0, 1);
         self.seen[1] |= key.1 == 3;
         self.seen[2] |= key.1 == 2;
-        self.saw_recovery |= packet.recovered_bytes > 0;
+        self.saw_recovery |= recovered_bytes > 0;
         Ok(sequence)
     }
     /// Declare clean EOF. Empty inventory and any prior failure remain incomplete.
