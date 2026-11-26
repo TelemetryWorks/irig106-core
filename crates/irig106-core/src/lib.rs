@@ -24,6 +24,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+mod admission;
 mod error;
 mod header;
 mod inspection;
@@ -31,6 +32,7 @@ mod integrity;
 mod pool;
 mod reader;
 mod sequence;
+mod whole;
 
 pub use error::{Error, ErrorKind, Recovery, Tail};
 pub use header::{Header, HeaderError, PRIMARY_HEADER_LEN, primary_checksum};
@@ -46,3 +48,9 @@ pub use sequence::{SequenceKind, SequenceObservation};
 pub use pool::{
     BLOCK_BYTES, BlockAssembly, BlockPool, DEFAULT_POOL_BUDGET, PoolError, PoolStats, PooledBlock,
 };
+
+pub use admission::{
+    AdmissionError, AdmissionEvidence, Authorization, DEFAULT_HARD_LIMIT, EditionPolicy,
+    SourceStamp, StableSource, UnconfirmedReason, WholePolicy,
+};
+pub use whole::{PacketBuf, PacketInfo, WholeEvent, WholePacketReader};

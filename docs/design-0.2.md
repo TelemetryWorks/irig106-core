@@ -394,3 +394,13 @@ callers wanting lower residency choose a lower budget at construction or call
 trim. Process/allocator overhead remains outside the accounted block budget.
 This is the coordinator-accepted hysteresis tradeoff, not a promise of 4 MiB idle
 storage after every burst.
+
+## Slice 3 integration boundary
+
+The [slice-3 evidence](verification-v02-s03.md) describes admission/EOF checks and
+the minimal direct-read whole-frame entry path requested with this assignment.
+This also brings forward part of the planned slice-4 incremental implementation.
+The caller reuses PacketBuf descriptors and moves buffer ownership to workers;
+reader/buffer workspace is charged to B and frozen during an active assembly.
+Coalescing, opt-in drain/chunk modes and broader resource/performance qualification
+remain later slices; no requirement or default has been relaxed.

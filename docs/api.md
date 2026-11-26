@@ -222,3 +222,52 @@ preserves typed budget/allocation/synchronization failures; PoolStats is account
 storage, not RSS. No new dependencies or unsafe library code. See
 [slice-2 evidence](verification-v02-s02.md) for partial requirement coverage;
 these primitives do not yet supply packet admission, valid-byte assembly or I/O.
+
+### Unreleased whole-packet integration (0.2 slice 3)
+
+`WholePolicy::new()` selects explicit 106-24R1 thresholds, H=128 MiB, no recovery
+cap, and legacy/stream oversoft allowances off. H is independent of the B selected
+on `BlockPool`; neither setting allocates payload capacity. Unknown edition codes
+use the ordinary soft threshold. Type-version bytes never select an edition.
+
+Construct `WholePacketReader::stream(source, policy, pool)` for a pipe/Read source,
+or `seek_checked(source, policy, pool)` for a `StableSource`. The latter supplies
+comparable `SourceStamp` size/identity/revision evidence and an exclusive cursor
+starting at zero; Read+Seek alone cannot prove stability. The adapter contract
+excludes concurrent same-size in-place writes that its stamps cannot detect.
+No File identity implementation or transport adapter is guessed by core.
+
+Create a caller-owned `PacketBuf::new(pool.clone())` and reuse it with
+`next_packet_into(&mut buf, absolute_deadline)`. `WholeEvent::Packet` means complete
+metadata is available through `buf.info()` and bytes through `contiguous()` (one
+block), `frame_spans()` or `data_spans()`. Spans borrow the buffer; workers move
+buffer ownership and return the same descriptors for reuse. Before each call,
+the previous frame is returned. No partial frame survives EOF/error as a packet.
+A terminal tail/error is followed by None, preserving 0.1 completion semantics.
+Wait deadlines bound pool waits, not a blocking source's Read/Seek.
+
+The shared framing engine uses a zero-capacity input wrapper in this mode:
+header/recovery reads use fixed primary scratch; body reads bypass buffering into
+final pooled slices, bounded by 4096 bytes, remaining block and remaining frame.
+One-block ordinary packets stay contiguous. Additional blocks are acquired only
+after the preceding one fills. Interrupted reads retry in place. The existing
+0.1 input buffer/capture behavior is unchanged.
+
+PacketBuf descriptors are reserved fallibly from pool geometry at construction,
+charged alongside reader control/scratch via workspace leases. Payload is not
+reserved from P. Constructors are nonblocking: outstanding assembly or occupied
+credits can return WouldBlock; explicitly release/trim and retry. Assembly checks
+include committed workspace, and workspace cannot grow during an active build.
+This prevents a new reader's metadata from invalidating an admitted build.
+Ordinary frames allocate zero after pool/descriptor warm-up in the scoped test;
+cold growth and trimming rare large records remain fallible allocation paths.
+
+Admission failures are `ErrorKind::Admission` with typed HardLimit,
+Uncorroborated, SourceChanged or TargetLimit causes; storage failures are
+`ErrorKind::Pool`. Oversoft frames require NextHeader, Unconfirmed(ExactEof), or
+explicit StreamOptIn evidence. Probe errors restore the cursor or fail closed;
+lookahead never advances logical offsets/recovery. Known short stable input drains
+to EOF with fixed scratch and emits a truncation, not a complete prefix.
+Secondary integrity stays structural; DATA checksum contents remain NotChecked.
+Explicit coalescing, drain/chunk delivery, broader platform/RSS controls and
+performance comparison remain later slices. See [slice-3 evidence](verification-v02-s03.md).

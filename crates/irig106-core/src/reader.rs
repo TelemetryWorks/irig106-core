@@ -131,10 +131,10 @@ pub enum Event {
 pub struct PacketReader<R> {
     input: BufReader<R>,
     limits: ReaderLimits,
-    position: u64,
-    established: bool,
-    done: bool,
-    recovery: Option<Recovery>,
+    pub(crate) position: u64,
+    pub(crate) established: bool,
+    pub(crate) done: bool,
+    pub(crate) recovery: Option<Recovery>,
 }
 impl<R: Read> PacketReader<R> {
     /// Construct a reader with bounded buffer/capture and optional explicit sync-search cap.
@@ -155,6 +155,19 @@ impl<R: Read> PacketReader<R> {
             recovery: None,
         })
     }
+    pub(crate) fn direct(input: R, recovery_bytes: Option<u64>) -> Self {
+        Self {
+            input: BufReader::with_capacity(0, input),
+            limits: ReaderLimits::new().with_recovery_bytes(recovery_bytes),
+            position: 0,
+            established: false,
+            done: false,
+            recovery: None,
+        }
+    }
+    pub(crate) fn source(&mut self) -> &mut R {
+        self.input.get_mut()
+    }
     /// Consumed byte offset, excluding buffered read-ahead.
     pub fn position(&self) -> u64 {
         self.position
@@ -170,7 +183,7 @@ impl<R: Read> PacketReader<R> {
             .ok_or(ErrorKind::OffsetOverflow)?;
         Ok(())
     }
-    fn read_counted(&mut self, out: &mut [u8]) -> Result<usize, ErrorKind> {
+    pub(crate) fn read_counted(&mut self, out: &mut [u8]) -> Result<usize, ErrorKind> {
         let mut total = 0;
         while total < out.len() {
             match self.input.read(&mut out[total..]) {
@@ -202,7 +215,7 @@ impl<R: Read> PacketReader<R> {
         }
         Ok(true)
     }
-    fn tail(&mut self, offset: u64, kind: TailKind) -> Result<Option<Event>, ErrorKind> {
+    pub(crate) fn tail(&mut self, offset: u64, kind: TailKind) -> Result<Option<Event>, ErrorKind> {
         self.done = true;
         let bytes = self.position - offset;
         if !self.established {
@@ -242,23 +255,24 @@ impl<R: Read> PacketReader<R> {
             }
         })
     }
-    fn next_inner(
-        &mut self,
-        capture: impl FnOnce(&Header) -> usize,
-    ) -> Result<Option<Event>, ErrorKind> {
+    pub(crate) fn find_header(&mut self) -> Result<FrameStart, ErrorKind> {
         let start = self.position;
         let mut b = [0; 24];
         match self.read_counted(&mut b)? {
             0 => {
                 self.done = true;
                 return if self.established {
-                    Ok(None)
+                    Ok(FrameStart::End(None))
                 } else {
                     Err(ErrorKind::NoCompletePacket { tail: None })
                 };
             }
             24 => (),
-            _ => return self.tail(start, TailKind::PartialHeader),
+            _ => {
+                return self
+                    .tail(start, TailKind::PartialHeader)
+                    .map(FrameStart::End);
+            }
         }
         // Reuse the primary parser: only sync/checksum failures search forward.
         let header = loop {
@@ -278,7 +292,9 @@ impl<R: Read> PacketReader<R> {
             }
             b.copy_within(1.., 0);
             if self.read_counted(&mut b[23..])? == 0 {
-                return self.tail(start, TailKind::Unsynchronized);
+                return self
+                    .tail(start, TailKind::Unsynchronized)
+                    .map(FrameStart::End);
             }
             if let Some(recovery) = &mut self.recovery {
                 recovery.scanned_bytes += 1;
@@ -287,6 +303,25 @@ impl<R: Read> PacketReader<R> {
         let offset = self.position - 24;
         let ranges =
             PacketRanges::from_header(&header).map_err(|source| ErrorKind::Header { source })?;
+        Ok(FrameStart::Header {
+            offset,
+            header,
+            ranges,
+        })
+    }
+    fn next_inner(
+        &mut self,
+        capture: impl FnOnce(&Header) -> usize,
+    ) -> Result<Option<Event>, ErrorKind> {
+        let (offset, header, ranges) = match self.find_header()? {
+            FrameStart::Header {
+                offset,
+                header,
+                ranges,
+            } => (offset, header, ranges),
+            FrameStart::End(event) => return Ok(event),
+        };
+        let start = self.recovery.map_or(offset, |r| r.start_offset);
         let wanted = capture(&header).min(header.data_length() as usize);
         if wanted > self.limits.capture_bytes {
             return Err(ErrorKind::CaptureLimit {
@@ -335,6 +370,15 @@ impl std::fmt::Display for TailKind {
             Self::Unsynchronized => "unsynchronized data",
         })
     }
+}
+
+pub(crate) enum FrameStart {
+    Header {
+        offset: u64,
+        header: Header,
+        ranges: PacketRanges,
+    },
+    End(Option<Event>),
 }
 
 #[cfg(test)]
