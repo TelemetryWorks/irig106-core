@@ -371,14 +371,17 @@ See [verification](verification-v02-admission-counts.md).
 
 `buf.coalesce_until(deadline)` returns an independent `CoalescedPacket` with
 borrowed frame()/data(), preserved info() and explicit evidence() describing the
-copy and its budget cost. Calling it is opt-in, even for one-block input; use
-contiguous() or spans for the default allocation-free borrow. Original and copy
+copy and its budget cost. Check contiguous() first; coalesce_until always copies,
+even for one block. Spans/contiguous() are the default allocation-free borrow. Original and copy
 are one transport packet, so inspect only one. The original is unchanged on error.
 
 B covers old blocks plus new capacity and metadata simultaneously. Default B
 refuses a maximum 128 MiB setup copy with BudgetTooSmall; raise B above 256 MiB
-plus overhead or consume spans. Active assembly/credit contention returns WouldBlock
-without waiting with held input. Release/retry explicitly; idle reclamation may
-require re-warm. Deadlines/cancellation are cooperative between bounded copies,
+plus overhead or consume spans. Copies may run concurrently with reader assembly:
+only available shared credits govern admission. Credit shortage returns WouldBlock
+without evicting warm idle blocks; successful credit admission may reclaim idle
+storage and require re-warm. Release/retry explicitly. Unlike pool begin_until/
+next_block_until, coalesce_until never waits for credits: _until bounds only the
+copy, and shortage returns WouldBlock immediately; no try_ variant is needed. Deadlines/cancellation are cooperative between bounded copies,
 not inside allocation/page faults. PoolStats::coalesced_bytes are returnable live
 credits, included in used_bytes and released after storage. See [evidence](verification-v02-coalescing.md).

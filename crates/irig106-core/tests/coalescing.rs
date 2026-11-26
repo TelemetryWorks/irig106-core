@@ -329,7 +329,9 @@ fn worker_copies_while_ordered_reader_assembles_with_shared_credits() {
         });
         reached.recv_timeout(Duration::from_secs(2)).unwrap();
         assert!(matches!(pool.try_begin(1), Err(PoolError::WouldBlock))); // Real assembly is active.
-        assert_eq!(pool.stats().unwrap().allocated_blocks, 4);
+        let paused = pool.stats().unwrap();
+        assert_eq!(paused.allocated_blocks, 4);
+        assert!(paused.used_bytes <= paused.budget_bytes);
         let copy = source.coalesce_until(until()).unwrap();
         assert_eq!(copy.frame(), first);
         let check = || {

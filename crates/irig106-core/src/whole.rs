@@ -152,8 +152,12 @@ impl PacketBuf {
             })
     }
     /// Explicitly copy a COMPLETE frame into independently owned contiguous storage.
-    /// Old+new capacity is charged. Never waits for credits/another build while
-    /// retaining input: WouldBlock requires release/retry. Deadline/cancellation
+    /// Check contiguous() first; coalesce_until always copies, even for one block.
+    /// Old+new capacity is charged, including concurrent reader assembly.
+    /// Unlike pool begin_until/next_block_until, this never waits for credits:
+    /// _until bounds only the copy; credit shortage returns WouldBlock immediately.
+    /// There is no try_ variant because credit acquisition is already non-waiting.
+    /// Deadline/cancellation
     /// are checked between bounded block copies, not inside the OS allocator.
     /// Source remains unchanged on success or failure; one-block callers can
     /// instead borrow contiguous() without copying. No automatic fallback.

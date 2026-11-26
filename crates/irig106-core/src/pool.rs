@@ -350,20 +350,20 @@ impl BlockPool {
                 limit: self.shared.budget,
             });
         }
-        // Waiting while retaining input could deadlock the active build. The
-        // caller must release/retry, never wait for a permit here.
-        if state.assembling {
+        // Returnable copy credits can coexist with an active assembly. Claims
+        // and next_block's provisional allocated count share this same lock.
+        let base = self.shared.fixed + state.workspace + state.coalesced;
+        let outstanding = state.allocated - state.idle.len();
+        // Preflight before evicting: WouldBlock must preserve the warm pool.
+        if base + outstanding * UNIT + bytes > self.shared.budget {
             return Err(PoolError::WouldBlock);
         }
-        let base = self.shared.fixed + state.workspace + state.coalesced;
+        // Explicit successful pressure may free idle Vecs under the mutex.
         while base + state.allocated * UNIT + bytes > self.shared.budget && !state.idle.is_empty() {
             drop(state.idle.pop());
             state.allocated -= 1;
         }
         self.shared.changed.notify_all();
-        if base + state.allocated * UNIT + bytes > self.shared.budget {
-            return Err(PoolError::WouldBlock);
-        }
         state.coalesced += bytes;
         Ok(CoalescedLease {
             pool: self.clone(),
