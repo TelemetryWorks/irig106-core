@@ -300,3 +300,11 @@ Exact-EOF's immediate pre-admission stamp recheck can catch a change between
 metadata queries; it does not protect the later read interval. The post-body
 stamp/consumed-size recheck is the guard over body consumption. Neither query
 proves the adapter's promise against undetectable same-size concurrent writes.
+
+Whole mode adapts only the header refill request: after a completed body at least
+as large as cutoff, request 24 bytes for the next header refill (within
+min(read-ahead capacity, 24 + cutoff)). Cold readers and readers after small bodies allow full capacity.
+Pending bytes are consumed first, including at straddling headers. Small-body
+and recovery refills still use full capacity. Body-copy selection, allocation,
+limits and public policy defaults are unchanged. See
+[adaptive-refill evidence](verification-v02-adaptive.md).

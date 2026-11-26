@@ -196,10 +196,11 @@ impl<R: Read> PacketReader<R> {
     pub(crate) fn buffered(&self) -> usize {
         self.scratch.as_ref().map_or(0, |b| b.available - b.used)
     }
-    fn refill(&mut self) -> Result<usize, ErrorKind> {
+    fn refill(&mut self, limit: usize) -> Result<usize, ErrorKind> {
         let scratch = self.scratch.as_mut().unwrap();
+        let requested = scratch.bytes.len().min(limit);
         loop {
-            match self.input.read(&mut scratch.bytes) {
+            match self.input.read(&mut scratch.bytes[..requested]) {
                 Ok(n) => {
                     scratch.used = 0;
                     scratch.available = n;
@@ -229,16 +230,21 @@ impl<R: Read> PacketReader<R> {
         Ok(())
     }
     pub(crate) fn read_counted(&mut self, out: &mut [u8]) -> Result<usize, ErrorKind> {
-        self.read_with(out, true)
+        self.read_with(out, true, usize::MAX)
     }
     pub(crate) fn read_body_counted(
         &mut self,
         out: &mut [u8],
         copy_body: bool,
     ) -> Result<usize, ErrorKind> {
-        self.read_with(out, copy_body)
+        self.read_with(out, copy_body, usize::MAX)
     }
-    fn read_with(&mut self, out: &mut [u8], prefetch: bool) -> Result<usize, ErrorKind> {
+    fn read_with(
+        &mut self,
+        out: &mut [u8],
+        prefetch: bool,
+        refill_limit: usize,
+    ) -> Result<usize, ErrorKind> {
         let mut total = 0;
         while total < out.len() {
             let buffered = if let Some(scratch) = &mut self.scratch {
@@ -256,7 +262,7 @@ impl<R: Read> PacketReader<R> {
                 continue;
             }
             if prefetch && self.scratch.is_some() {
-                if self.refill()? == 0 {
+                if self.refill(refill_limit)? == 0 {
                     break;
                 }
                 continue;
@@ -331,9 +337,15 @@ impl<R: Read> PacketReader<R> {
         })
     }
     pub(crate) fn find_header(&mut self) -> Result<FrameStart, ErrorKind> {
+        self.find_header_limited(usize::MAX)
+    }
+    pub(crate) fn find_header_limited(
+        &mut self,
+        refill_limit: usize,
+    ) -> Result<FrameStart, ErrorKind> {
         let start = self.position;
         let mut b = [0; 24];
-        match self.read_counted(&mut b)? {
+        match self.read_with(&mut b, true, refill_limit)? {
             0 => {
                 self.done = true;
                 return if self.established {
@@ -459,6 +471,14 @@ pub(crate) enum FrameStart {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn whole_read_ahead_minimum_is_one_complete_primary_header() {
+        assert!(matches!(
+            PacketReader::whole(&[][..], None, 23),
+            Err(PoolError::InvalidRequest)
+        ));
+        assert!(PacketReader::whole(&[][..], None, 24).is_ok());
+    }
     #[test]
     fn offset_overflow_is_typed_without_wrapping() {
         let mut reader = PacketReader::new(&[][..], ReaderLimits::default()).unwrap();

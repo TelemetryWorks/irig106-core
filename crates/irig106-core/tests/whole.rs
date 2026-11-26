@@ -1356,3 +1356,256 @@ fn hybrid_prefetch_mutation_is_detected_against_constructor_snapshot() {
         ));
     });
 }
+
+struct BoundaryProbe {
+    input: Cursor<Vec<u8>>,
+    requests: Vec<(u64, usize)>,
+    short_at: Option<(u64, usize)>,
+}
+impl Read for BoundaryProbe {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        let offset = self.input.position();
+        self.requests.push((offset, out.len()));
+        let maximum = self
+            .short_at
+            .filter(|(at, _)| *at == offset)
+            .map_or(out.len(), |(_, n)| n);
+        let n = out.len().min(maximum);
+        self.input.read(&mut out[..n])
+    }
+}
+#[test]
+fn adaptive_boundary_refills_cap_after_large_and_restore_full_after_small() {
+    watchdog(Duration::from_secs(5), || {
+        let pool = BlockPool::with_defaults().unwrap();
+        let mut buf = PacketBuf::new(pool.clone()).unwrap();
+        let frames = [
+            frame(65_536, 0, 9, 0),
+            frame(28, 0, 9, 0),
+            frame(65_536, 0, 9, 0),
+            frame(28, 0, 9, 0),
+        ];
+        let input = BoundaryProbe {
+            input: Cursor::new(frames.concat()),
+            requests: Vec::with_capacity(8),
+            short_at: Some((65_560, 4)),
+        };
+        let mut r = WholePacketReader::stream(input, WholePolicy::new(), pool).unwrap();
+        let mut offset = 0;
+        for expected in &frames {
+            r.next_packet_into(&mut buf, deadline()).unwrap();
+            assert_eq!(buf.contiguous().unwrap(), expected);
+            assert_eq!(buf.info().unwrap().offset, offset);
+            offset += expected.len() as u64;
+        }
+        assert!(r.next_packet_into(&mut buf, deadline()).unwrap().is_none());
+        assert_eq!(
+            r.into_inner().requests,
+            [
+                (0, 65_536),
+                (65_536, 24),
+                (65_560, 65_536),
+                (65_564, 65_536),
+                (131_100, 24),
+                (131_124, 65_536),
+                (131_128, 65_536)
+            ]
+        );
+    });
+}
+#[test]
+fn adaptive_boundary_caps_cover_large_standard_sizes() {
+    watchdog(Duration::from_secs(5), || {
+        for p in [65_536, 65_560, 524_288] {
+            let pool = BlockPool::with_defaults().unwrap();
+            let mut buf = PacketBuf::new(pool.clone()).unwrap();
+            let f = frame(p, 0, 9, 0);
+            let mut bytes = f.clone();
+            bytes.extend(&f);
+            let input = BoundaryProbe {
+                input: Cursor::new(bytes),
+                requests: Vec::with_capacity(8),
+                short_at: None,
+            };
+            let mut r = WholePacketReader::stream(input, WholePolicy::new(), pool).unwrap();
+            for _ in 0..2 {
+                r.next_packet_into(&mut buf, deadline()).unwrap();
+                assert_eq!(buf.contiguous().unwrap(), f);
+            }
+            let requests = r.into_inner().requests;
+            let &(_, request) = requests.iter().find(|(at, _)| *at == u64::from(p)).unwrap();
+            assert_eq!(request, 24);
+        }
+    });
+}
+#[test]
+fn read_ahead_minimum_applies_to_stream_and_seek_checked_without_leaking_workspace() {
+    watchdog(Duration::from_secs(5), || {
+        let pool = BlockPool::with_defaults().unwrap();
+        let before = pool.stats().unwrap().used_bytes;
+        for capacity in [23, 24] {
+            let policy = WholePolicy::new().with_read_ahead_bytes(capacity);
+            let stream =
+                WholePacketReader::stream(Cursor::new(frame(28, 0, 9, 0)), policy, pool.clone());
+            let seek =
+                WholePacketReader::seek_checked(stable(frame(28, 0, 9, 0)), policy, pool.clone());
+            if capacity == 23 {
+                assert!(matches!(
+                    stream.err().unwrap().reason,
+                    ErrorKind::Pool {
+                        source: PoolError::InvalidRequest,
+                        ..
+                    }
+                ));
+                assert!(matches!(
+                    seek.err().unwrap().reason,
+                    ErrorKind::Pool {
+                        source: PoolError::InvalidRequest,
+                        ..
+                    }
+                ));
+            } else {
+                drop(stream.unwrap());
+                drop(seek.unwrap());
+            }
+            assert_eq!(pool.stats().unwrap().used_bytes, before);
+        }
+    });
+}
+struct MatrixRead<'a> {
+    input: Cursor<&'a [u8]>,
+    maximum: usize,
+    interrupt: bool,
+}
+impl Read for MatrixRead<'_> {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if !self.interrupt && self.input.position() > 0 {
+            self.interrupt = true;
+            return Err(io::ErrorKind::Interrupted.into());
+        }
+        let n = out.len().min(self.maximum);
+        self.input.read(&mut out[..n])
+    }
+}
+#[test]
+fn adaptive_boundary_straddle_cutoff_and_short_read_matrix() {
+    watchdog(Duration::from_secs(30), || {
+        let sizes = [28, 32, 48, 64, 128, 4096, 4116, 4120, 65_536, 65_560];
+        let frames: Vec<_> = sizes
+            .into_iter()
+            .enumerate()
+            .map(|(i, p)| {
+                frame(
+                    p,
+                    i as u16,
+                    9,
+                    if p >= 48 { 0x80 | (i as u8 % 4) } else { 0 },
+                )
+            })
+            .collect();
+        let mut corpus = Vec::new();
+        let mut expected = Vec::new();
+        for (i, f) in frames.iter().enumerate() {
+            let gap = if i == 3 || i == 7 { 3 } else { 0 };
+            corpus.extend(std::iter::repeat_n(0x55, gap));
+            expected.push((corpus.len() as u64, gap as u64));
+            corpus.extend(f);
+        }
+        let mut packets = 0;
+        for capacity in [24, 25, 31, 64, 256, 4096, 65_536] {
+            for cutoff in [0, 1, 4, 24, 4096, 65_536, usize::MAX] {
+                for maximum in [1, 7, 23, usize::MAX] {
+                    let pool = BlockPool::with_defaults().unwrap();
+                    let mut buf = PacketBuf::new(pool.clone()).unwrap();
+                    let input = MatrixRead {
+                        input: Cursor::new(corpus.as_slice()),
+                        maximum,
+                        interrupt: false,
+                    };
+                    let policy = WholePolicy::new()
+                        .with_read_ahead_bytes(capacity)
+                        .with_small_body_cutoff(cutoff);
+                    let mut r = WholePacketReader::stream(input, policy, pool).unwrap();
+                    for (i, f) in frames.iter().enumerate() {
+                        assert!(matches!(
+                            r.next_packet_into(&mut buf, deadline()).unwrap(),
+                            Some(WholeEvent::Packet)
+                        ));
+                        assert_eq!(
+                            buf.contiguous().unwrap(),
+                            f,
+                            "capacity={capacity}, cutoff={cutoff}, short={maximum}, frame={i}"
+                        );
+                        let info = buf.info().unwrap();
+                        assert_eq!((info.offset, info.recovered_bytes), expected[i]);
+                        packets += 1;
+                    }
+                    assert!(r.next_packet_into(&mut buf, deadline()).unwrap().is_none());
+                    assert_eq!(r.position(), corpus.len() as u64);
+                }
+            }
+        }
+        assert_eq!(packets, 1960);
+    });
+}
+
+#[test]
+fn adaptive_limited_header_does_not_limit_small_body_refills() {
+    watchdog(Duration::from_secs(5), || {
+        let pool = BlockPool::with_defaults().unwrap();
+        let mut buf = PacketBuf::new(pool.clone()).unwrap();
+        let frames = [
+            frame(65_536, 0, 9, 0),
+            frame(28, 0, 9, 0),
+            frame(65_536, 0, 9, 0),
+            frame(28, 0, 9, 0),
+        ];
+        let input = BoundaryProbe {
+            input: Cursor::new(frames.concat()),
+            requests: Vec::with_capacity(8),
+            short_at: None,
+        };
+        let mut r = WholePacketReader::stream(input, WholePolicy::new(), pool).unwrap();
+        for expected in &frames {
+            r.next_packet_into(&mut buf, deadline()).unwrap();
+            assert_eq!(buf.contiguous().unwrap(), expected);
+        }
+        assert!(r.next_packet_into(&mut buf, deadline()).unwrap().is_none());
+        assert_eq!(
+            r.into_inner().requests,
+            [
+                (0, 65_536),
+                (65_536, 24),
+                (65_560, 65_536),
+                (131_096, 4),
+                (131_100, 24),
+                (131_124, 65_536),
+                (131_128, 65_536)
+            ]
+        );
+    });
+}
+#[test]
+fn adaptive_limited_header_does_not_limit_recovery_refills() {
+    watchdog(Duration::from_secs(5), || {
+        let pool = BlockPool::with_defaults().unwrap();
+        let mut buf = PacketBuf::new(pool.clone()).unwrap();
+        let mut bytes = frame(65_536, 0, 9, 0);
+        bytes.extend(std::iter::repeat_n(0x55, 100_000));
+        bytes.extend(frame(28, 0, 9, 0));
+        let input = BoundaryProbe {
+            input: Cursor::new(bytes),
+            requests: Vec::with_capacity(8),
+            short_at: None,
+        };
+        let mut r = WholePacketReader::stream(input, WholePolicy::new(), pool).unwrap();
+        r.next_packet_into(&mut buf, deadline()).unwrap();
+        r.next_packet_into(&mut buf, deadline()).unwrap();
+        assert_eq!(buf.contiguous().unwrap(), frame(28, 0, 9, 0));
+        assert_eq!(buf.info().unwrap().offset, 165_536);
+        assert_eq!(buf.info().unwrap().recovered_bytes, 100_000);
+        let requests = r.into_inner().requests;
+        assert_eq!(requests[1], (65_536, 24));
+        assert!(requests[2..].iter().all(|(_, n)| *n == 65_536));
+    });
+}

@@ -143,6 +143,7 @@ struct SourceOps<R> {
 pub struct WholePacketReader<R> {
     framing: PacketReader<R>,
     policy: WholePolicy,
+    previous_large: bool,
     pool: BlockPool,
     source: Option<SourceOps<R>>,
     _workspace: Workspace,
@@ -183,6 +184,7 @@ impl<R: Read> WholePacketReader<R> {
                 },
             )?,
             policy,
+            previous_large: false,
             pool,
             source: None,
             _workspace: workspace,
@@ -271,7 +273,10 @@ impl<R: Read> WholePacketReader<R> {
         if !self.pool.same_pool(&buf.pool) {
             return Err(PoolError::InvalidRequest.into());
         }
-        let (offset, header, ranges) = match self.framing.find_header()? {
+        // Predict only header-refill size, never body delivery/copy policy.
+        // No previous frame (and a previous small body) keeps full amortisation.
+        let header_limit = if self.previous_large { 24 } else { usize::MAX };
+        let (offset, header, ranges) = match self.framing.find_header_limited(header_limit)? {
             FrameStart::Header {
                 offset,
                 header,
@@ -374,6 +379,7 @@ impl<R: Read> WholePacketReader<R> {
             None
         };
         self.framing.established = true;
+        self.previous_large = body >= self.policy.small_body;
         buf.info = Some(PacketInfo {
             offset,
             header,
