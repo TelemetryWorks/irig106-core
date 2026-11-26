@@ -29,8 +29,9 @@ Unlike pool begin_until/next_block_until, coalesce_until never waits for credits
 _until bounds only the copy, and a shortage returns WouldBlock immediately.
 Credit preflight accounts all reclaimable idle blocks before eviction; WouldBlock
 preserves warm idle storage. Successful credit admission may reclaim idle blocks,
-requiring re-warm. Coordinator follow-up: an already waiting build has priority;
-coalescing returns WouldBlock before eviction while state.waiting > 0. Active
+requiring re-warm. Coordinator follow-up: a build waiting for block credits has priority;
+coalescing returns WouldBlock before eviction while state.waiting_for_credits > 0.
+Readers queued for assembly permits do not take this priority. Active
 assembly alone remains allowed. A reader can wait cancellably with a deadline
 for copies/input to return.
 The orchestrator must release input before waiting for an output merger. The caller may
@@ -95,3 +96,21 @@ and M1 (reserve before credits) now fail with assertion panics/exit101. Reinstat
 the exclusivity gate, restoring evict-then-WouldBlock, or omitting owner metadata
 charge (M14) also fails. All temporary mutations were discarded before final lint.
 The copy's field declaration order still frees the Vec before its lease.
+
+
+## Credit-waiter follow-up
+
+At 9453b52 the total waiter gate wrongly refused a worker copy whenever a second
+reader queued for the assembly permit. The watchdog-bounded queued-reader test
+reproduces that failure before the fix. WaitFor distinguishes assembly waits
+from block-credit waits at the common condition-variable boundary; only the
+latter increment/decrement waiting_for_credits around each timed wait. The total
+waiting count keeps its existing meaning. PoolStats reports both; the fairness
+unit model now pins the returned-idle window with a credit waiter. A real credit
+wait also asserts that the subset is one while blocked and zero after completion.
+
+The M21 regression holds one copy where only that copy fits: the second returns
+WouldBlock, used/coalesced credits remain unchanged and used <= B, first-copy
+bytes remain exact, and dropping it admits a replacement. Omitting existing
+coalesced credits from admission makes this test fail. Restoring the total-waiter
+gate fails the queued-reader test. Both temporary controls are discarded.

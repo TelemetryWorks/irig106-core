@@ -155,7 +155,8 @@ impl PacketBuf {
     /// Check contiguous() first; coalesce_until always copies, even for one block.
     /// Old+new capacity is charged, including concurrent reader assembly.
     /// Unlike pool begin_until/next_block_until, this never waits for credits:
-    /// Waiting readers have priority: WouldBlock preserves idle storage.
+    /// Block-credit waiters have priority; queued assembly permits do not.
+    /// WouldBlock preserves idle storage.
     /// _until bounds only the copy; credit shortage returns WouldBlock immediately.
     /// There is no try_ variant because credit acquisition is already non-waiting.
     /// Deadline/cancellation

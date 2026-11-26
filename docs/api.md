@@ -378,8 +378,10 @@ are one transport packet, so inspect only one. The original is unchanged on erro
 B covers old blocks plus new capacity and metadata simultaneously. Default B
 refuses a maximum 128 MiB setup copy with BudgetTooSmall; raise B above 256 MiB
 plus overhead or consume spans. Copies may run concurrently with reader assembly:
-shared credits govern admission, with priority for already waiting readers.
-While a build is waiting, copying returns WouldBlock without idle eviction.
+shared credits govern admission, with priority only for block-credit waiters
+(next_block_until). Readers queued for the assembly permit (begin_until) do not
+block copying. PoolStats::waiting includes both classes; waiting_for_credits
+is the subset that causes WouldBlock without idle eviction.
 Credit shortage also returns WouldBlock
 without evicting warm idle blocks; successful credit admission may reclaim idle
 storage and require re-warm. Release/retry explicitly. Unlike pool begin_until/

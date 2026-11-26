@@ -144,6 +144,7 @@ fn coalesced_credits_are_returnable_not_permanent_workspace() {
             thread::yield_now();
         }
         assert!(pool.stats().unwrap().used_bytes <= pool.stats().unwrap().budget_bytes);
+        assert_eq!(pool.stats().unwrap().waiting_for_credits, 1);
         drop(copy);
         receive.recv_timeout(Duration::from_secs(2)).unwrap();
         while !worker.is_finished() {
@@ -151,6 +152,7 @@ fn coalesced_credits_are_returnable_not_permanent_workspace() {
             thread::yield_now();
         }
         worker.join().unwrap();
+        assert_eq!(pool.stats().unwrap().waiting_for_credits, 0);
         assert_eq!(pool.stats().unwrap().coalesced_bytes, 0);
     });
 }
@@ -365,6 +367,60 @@ fn worker_copies_while_ordered_reader_assembles_with_shared_credits() {
         producer.join().unwrap();
         drop(copy);
         assert_eq!(pool.stats().unwrap().coalesced_bytes, 0);
+        assert!(pool.stats().unwrap().used_bytes <= pool.stats().unwrap().budget_bytes);
+    });
+}
+
+#[test]
+fn queued_assembly_reader_does_not_block_worker_copy() {
+    support::watchdog(Duration::from_secs(10), || {
+        use std::thread;
+        let pool = BlockPool::new(4 * BLOCK_BYTES + 131072).unwrap();
+        let (source, bytes) = load(&pool);
+        let assembly = pool.try_begin(1).unwrap();
+        let p = pool.clone();
+        let queued = thread::spawn(move || p.begin_until(1, until()));
+        let bound = until();
+        while pool.stats().unwrap().waiting == 0 {
+            assert!(Instant::now() < bound);
+            thread::yield_now();
+        }
+        assert_eq!(pool.stats().unwrap().waiting_for_credits, 0);
+        let copy = source.coalesce_until(until()).unwrap();
+        assert_eq!(copy.frame(), bytes);
+        assert!(pool.stats().unwrap().used_bytes <= pool.stats().unwrap().budget_bytes);
+        drop(assembly);
+        while !queued.is_finished() {
+            assert!(Instant::now() < bound);
+            thread::yield_now();
+        }
+        drop(queued.join().unwrap().unwrap());
+        assert_eq!(pool.stats().unwrap().waiting, 0);
+        drop(copy);
+    });
+}
+
+#[test]
+fn two_copies_compete_for_returnable_credits() {
+    support::watchdog(Duration::from_secs(5), || {
+        let pool = BlockPool::new(3 * BLOCK_BYTES + 131072).unwrap();
+        let (source, bytes) = load(&pool);
+        let first = source.coalesce_until(until()).unwrap();
+        let before = pool.stats().unwrap();
+        assert!(before.used_bytes <= before.budget_bytes);
+        assert!(matches!(
+            source.coalesce_until(until()),
+            Err(PoolError::WouldBlock)
+        ));
+        let after = pool.stats().unwrap();
+        assert_eq!(after.used_bytes, before.used_bytes);
+        assert_eq!(after.coalesced_bytes, first.evidence().charged_bytes);
+        assert!(after.used_bytes <= after.budget_bytes);
+        assert_eq!(first.frame(), bytes);
+        drop(first);
+        assert_eq!(pool.stats().unwrap().coalesced_bytes, 0);
+        let second = source.coalesce_until(until()).unwrap();
+        assert_eq!(second.frame(), bytes);
         assert!(pool.stats().unwrap().used_bytes <= pool.stats().unwrap().budget_bytes);
     });
 }

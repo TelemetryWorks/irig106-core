@@ -87,9 +87,15 @@ struct State {
     assembling: bool,
     cancelled: bool,
     waiting: usize,
+    waiting_for_credits: usize,
     allocations: u64,
     #[cfg(test)]
     wakes: usize,
+}
+#[derive(Clone, Copy)]
+enum WaitFor {
+    Assembly,
+    Credits,
 }
 #[derive(Debug)]
 struct Shared {
@@ -120,8 +126,10 @@ pub struct PoolStats {
     pub idle_blocks: usize,
     /// Successful cold payload allocations (saturates at u64::MAX).
     pub block_allocations: u64,
-    /// Current condition-variable waiters.
+    /// Current condition-variable waiters (assembly permits and block credits).
     pub waiting: usize,
+    /// Subset waiting for block credits; only these take priority over copies.
+    pub waiting_for_credits: usize,
 }
 /// Shared lazy block pool. Cloning a handle never allocates payload storage.
 #[derive(Debug, Clone)]
@@ -159,6 +167,7 @@ impl BlockPool {
                     assembling: false,
                     cancelled: false,
                     waiting: 0,
+                    waiting_for_credits: 0,
                     allocations: 0,
                     #[cfg(test)]
                     wakes: 0,
@@ -177,6 +186,7 @@ impl BlockPool {
         &self,
         mut state: MutexGuard<'a, State>,
         deadline: Option<Instant>,
+        reason: WaitFor,
     ) -> Result<MutexGuard<'a, State>, PoolError> {
         // No ownership/thread inference: only absence of all possible returners
         // proves that waiting cannot help. Callers check readiness before this.
@@ -193,12 +203,18 @@ impl BlockPool {
             .filter(|duration| !duration.is_zero())
             .ok_or(PoolError::DeadlineExceeded)?;
         state.waiting += 1;
+        if matches!(reason, WaitFor::Credits) {
+            state.waiting_for_credits += 1;
+        }
         let (mut state, _) = self
             .shared
             .changed
             .wait_timeout(state, remaining)
             .map_err(|_| PoolError::Poisoned)?;
         state.waiting -= 1;
+        if matches!(reason, WaitFor::Credits) {
+            state.waiting_for_credits -= 1;
+        }
         #[cfg(test)]
         {
             state.wakes += 1;
@@ -257,7 +273,7 @@ impl BlockPool {
                 state.assembling = true;
                 break;
             }
-            state = self.wait(state, deadline)?;
+            state = self.wait(state, deadline, WaitFor::Assembly)?;
         }
         Ok(BlockAssembly {
             pool: self.clone(),
@@ -350,9 +366,10 @@ impl BlockPool {
                 limit: self.shared.budget,
             });
         }
-        // Give already waiting readers first access to returned credits.
+        // Give credit waiters first access to returned credits; queued assembly
+        // permits must not reintroduce reader/copy exclusivity.
         // Refuse before any idle eviction; active assembly alone is allowed.
-        if state.waiting > 0 {
+        if state.waiting_for_credits > 0 {
             return Err(PoolError::WouldBlock);
         }
         // Returnable copy credits can coexist with an active assembly. Claims
@@ -417,6 +434,7 @@ impl BlockPool {
             idle_blocks: state.idle.len(),
             block_allocations: state.allocations,
             waiting: state.waiting,
+            waiting_for_credits: state.waiting_for_credits,
         })
     }
 }
@@ -524,7 +542,7 @@ impl BlockAssembly {
                     }
                 }
             }
-            state = self.pool.wait(state, deadline)?;
+            state = self.pool.wait(state, deadline, WaitFor::Credits)?;
         };
         self.remaining -= 1;
         Ok(PooledBlock {
@@ -613,7 +631,11 @@ mod tests {
         drop(assembly.try_next_block().unwrap());
         // Model the mutex-visible window after a block returns but before a
         // notified credit waiter re-acquires the lock. No scheduler race needed.
-        pool.lock().unwrap().waiting = 1;
+        {
+            let mut state = pool.lock().unwrap();
+            state.waiting = 1;
+            state.waiting_for_credits = 1;
+        }
         let before = pool.stats().unwrap();
         assert_eq!(before.idle_blocks, 1);
         assert!(matches!(
@@ -625,7 +647,11 @@ mod tests {
         assert_eq!(after.allocated_blocks, before.allocated_blocks);
         assert_eq!(after.idle_blocks, before.idle_blocks);
         assert_eq!(after.coalesced_bytes, 0);
-        pool.lock().unwrap().waiting = 0;
+        {
+            let mut state = pool.lock().unwrap();
+            state.waiting = 0;
+            state.waiting_for_credits = 0;
+        }
         // The active assembly itself is no barrier; only waiter priority was.
         let copy = pool.coalescing(BLOCK_BYTES / 2, 1).unwrap();
         let admitted = pool.stats().unwrap();
@@ -698,7 +724,7 @@ mod tests {
             // this state, so it never needs to wait. No owner can release anything.
             let state = pool.lock().unwrap();
             assert!(matches!(
-                pool.wait(state, Some(Instant::now())),
+                pool.wait(state, Some(Instant::now()), WaitFor::Assembly),
                 Err(PoolError::BudgetUnavailable)
             ));
             assert_eq!(pool.stats().unwrap().waiting, 0);
@@ -730,6 +756,7 @@ mod tests {
                 Err(PoolError::DeadlineExceeded)
             ));
             assert_eq!(pool.stats().unwrap().waiting, 0);
+            assert_eq!(pool.stats().unwrap().waiting_for_credits, 0);
             drop(block);
             // Readiness is checked before the wait deadline; the failed attempt kept its slot.
             drop(next.next_block_until(Instant::now()).unwrap());
