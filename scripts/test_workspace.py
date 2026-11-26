@@ -54,8 +54,8 @@ class WorkspaceContract(unittest.TestCase):
         expected.update(f"src/{name}.rs" for name in
                         ["lib", "header", "reader", "error", "integrity", "inspection", "sequence", "pool", "admission", "whole"])
         expected.update(f"tests/{name}.rs" for name in
-                        ["primary_header", "reader", "completion", "integrity", "inspection", "sequence", "pool", "whole"])
-        expected.update(["examples/inspect.rs", "examples/rss_probe.rs"])
+                        ["primary_header", "reader", "completion", "integrity", "inspection", "sequence", "pool", "whole", "read_strategy_bench"])
+        expected.update(["tests/support/watchdog.rs", "examples/inspect.rs", "examples/rss_probe.rs"])
         self.assertEqual(set(files), expected)
         self.assertEqual(
             hashlib.sha256((ROOT / "LICENSE").read_bytes()).digest(),

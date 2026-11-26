@@ -62,7 +62,7 @@ jobs:
         run: cargo test -p irig106-core --test whole --locked bounded_file_read_benchmark -- --ignored --exact --nocapture
       - name: Small-body strategy comparison (owner decision pending)
         if: matrix.os == 'ubuntu-24.04'
-        run: cargo test --release -p irig106-core --test whole --locked small_body_read_strategy_benchmark -- --ignored --exact --nocapture
+        run: cargo test --release -p irig106-core --test read_strategy_bench --locked small_body_read_strategy_benchmark -- --ignored --exact --nocapture
 
   contract:
     name: Workspace, lint, docs and package

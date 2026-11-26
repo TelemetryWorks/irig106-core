@@ -1,9 +1,12 @@
 //! Hand-packed frame/admission probes; no encoder or capture-reader oracle.
+#[path = "support/watchdog.rs"]
+mod support;
 use irig106_core::*;
 use std::{
     io::{self, Cursor, Read, Seek, SeekFrom},
     time::{Duration, Instant},
 };
+use support::watchdog;
 fn frame(p: u32, channel: u16, kind: u8, flags: u8) -> Vec<u8> {
     let mut b = vec![0x5a; p as usize];
     b[..24].fill(0);
@@ -54,6 +57,12 @@ fn stable(b: Vec<u8>) -> Stable {
 }
 #[test]
 fn direct_blocks_admission_eof_and_truncation() {
+    watchdog(
+        Duration::from_secs(5),
+        direct_blocks_admission_eof_and_truncation_case,
+    );
+}
+fn direct_blocks_admission_eof_and_truncation_case() {
     let pool = BlockPool::with_defaults().unwrap();
     let mut buf = PacketBuf::new(pool.clone()).unwrap();
     let mut bytes = frame(524_292, 7, 9, 0);
@@ -123,6 +132,12 @@ fn direct_blocks_admission_eof_and_truncation() {
 }
 #[test]
 fn refusals_legacy_and_no_speculative_growth() {
+    watchdog(
+        Duration::from_secs(5),
+        refusals_legacy_and_no_speculative_growth_case,
+    );
+}
+fn refusals_legacy_and_no_speculative_growth_case() {
     let pool = BlockPool::with_defaults().unwrap();
     let mut b = PacketBuf::new(pool.clone()).unwrap();
     assert_eq!(WholePolicy::new().hard_limit(), 134_217_728);
@@ -213,6 +228,12 @@ unsafe impl GlobalAlloc for Counter {
 static COUNTER: Counter = Counter;
 #[test]
 fn mixed_ordinary_frames_allocate_zero_after_warmup() {
+    watchdog(
+        Duration::from_secs(5),
+        mixed_ordinary_frames_allocate_zero_after_warmup_case,
+    );
+}
+fn mixed_ordinary_frames_allocate_zero_after_warmup_case() {
     let pool = BlockPool::with_defaults().unwrap();
     let mut buf = PacketBuf::new(pool.clone()).unwrap();
     let mut bytes = Vec::new();
@@ -257,6 +278,12 @@ impl Read for DirectProbe {
 }
 #[test]
 fn body_destinations_are_final_storage_even_with_short_and_interrupted_reads() {
+    watchdog(
+        Duration::from_secs(5),
+        body_destinations_are_final_storage_even_with_short_and_interrupted_reads_case,
+    );
+}
+fn body_destinations_are_final_storage_even_with_short_and_interrupted_reads_case() {
     let pool = BlockPool::with_defaults().unwrap();
     let mut buf = PacketBuf::new(pool.clone()).unwrap();
     let expected = frame(128, 1, 9, 0x83);
@@ -282,6 +309,12 @@ fn body_destinations_are_final_storage_even_with_short_and_interrupted_reads() {
 }
 #[test]
 fn small_huge_claim_is_one_provisional_block_or_known_eof_drain() {
+    watchdog(
+        Duration::from_secs(5),
+        small_huge_claim_is_one_provisional_block_or_known_eof_drain_case,
+    );
+}
+fn small_huge_claim_is_one_provisional_block_or_known_eof_drain_case() {
     for seekable in [false, true] {
         let pool = BlockPool::with_defaults().unwrap();
         let mut buf = PacketBuf::new(pool.clone()).unwrap();
@@ -314,6 +347,12 @@ fn small_huge_claim_is_one_provisional_block_or_known_eof_drain() {
 }
 #[test]
 fn recovery_and_policy_refusals_are_terminal_and_keep_offsets() {
+    watchdog(
+        Duration::from_secs(5),
+        recovery_and_policy_refusals_are_terminal_and_keep_offsets_case,
+    );
+}
+fn recovery_and_policy_refusals_are_terminal_and_keep_offsets_case() {
     let pool = BlockPool::with_defaults().unwrap();
     let mut buf = PacketBuf::new(pool.clone()).unwrap();
     let mut raw = frame(28, 0, 9, 0);
@@ -374,6 +413,12 @@ fn recovery_and_policy_refusals_are_terminal_and_keep_offsets() {
 }
 #[test]
 fn budget_impossibility_and_temporary_pressure_use_distinct_typed_errors() {
+    watchdog(
+        Duration::from_secs(5),
+        budget_impossibility_and_temporary_pressure_use_distinct_typed_errors_case,
+    );
+}
+fn budget_impossibility_and_temporary_pressure_use_distinct_typed_errors_case() {
     let pool = BlockPool::new(BLOCK_BYTES + 65536).unwrap();
     let mut buf = PacketBuf::new(pool.clone()).unwrap();
     let mut r = WholePacketReader::stream(
@@ -445,6 +490,12 @@ impl Read for SetupSource {
 #[test]
 #[ignore = "128 MiB acceptance runs explicitly in GitHub CI"]
 fn maximum_setup_fits_default_h_and_b() {
+    watchdog(
+        Duration::from_secs(60),
+        maximum_setup_fits_default_h_and_b_case,
+    );
+}
+fn maximum_setup_fits_default_h_and_b_case() {
     let mut header = frame(28, 0, 1, 0);
     header[4..8].copy_from_slice(&DEFAULT_HARD_LIMIT.to_le_bytes());
     let sum = header[..22].chunks_exact(2).fold(0u16, |s, w| {
@@ -479,6 +530,12 @@ fn maximum_setup_fits_default_h_and_b() {
 
 #[test]
 fn setup_scope_unknown_edition_and_header_versions_are_explicit() {
+    watchdog(
+        Duration::from_secs(5),
+        setup_scope_unknown_edition_and_header_versions_are_explicit_case,
+    );
+}
+fn setup_scope_unknown_edition_and_header_versions_are_explicit_case() {
     for (channel, edition, legacy, allowed) in [
         (0, EditionPolicy::Irig106_24R1, false, true),
         (2, EditionPolicy::Irig106_24R1, false, false),
@@ -532,6 +589,12 @@ impl Read for Denied {
 }
 #[test]
 fn fatal_framing_and_operational_errors_never_become_tails_or_recoveries() {
+    watchdog(
+        Duration::from_secs(5),
+        fatal_framing_and_operational_errors_never_become_tails_or_recoveries_case,
+    );
+}
+fn fatal_framing_and_operational_errors_never_become_tails_or_recoveries_case() {
     let pool = BlockPool::with_defaults().unwrap();
     let mut buf = PacketBuf::new(pool.clone()).unwrap();
     let mut r = WholePacketReader::stream(
@@ -568,6 +631,12 @@ fn fatal_framing_and_operational_errors_never_become_tails_or_recoveries() {
 
 #[test]
 fn worker_return_unblocks_whole_reader_within_same_aggregate_budget() {
+    watchdog(
+        Duration::from_secs(5),
+        worker_return_unblocks_whole_reader_within_same_aggregate_budget_case,
+    );
+}
+fn worker_return_unblocks_whole_reader_within_same_aggregate_budget_case() {
     let pool = BlockPool::new(BLOCK_BYTES + 65536).unwrap();
     let mut buf = PacketBuf::new(pool.clone()).unwrap();
     let mut r = WholePacketReader::stream(
@@ -624,6 +693,12 @@ impl StableSource for ProbeDenied {
 }
 #[test]
 fn failed_probe_restores_cursor_and_never_falls_back_to_stream_trust() {
+    watchdog(
+        Duration::from_secs(5),
+        failed_probe_restores_cursor_and_never_falls_back_to_stream_trust_case,
+    );
+}
+fn failed_probe_restores_cursor_and_never_falls_back_to_stream_trust_case() {
     let pool = BlockPool::with_defaults().unwrap();
     let mut buf = PacketBuf::new(pool.clone()).unwrap();
     let mut bytes = frame(524_292, 0, 9, 0);
@@ -643,6 +718,12 @@ fn failed_probe_restores_cursor_and_never_falls_back_to_stream_trust() {
 
 #[test]
 fn uncorroborated_size_is_refused_before_waiting_for_build_admission() {
+    watchdog(
+        Duration::from_secs(5),
+        uncorroborated_size_is_refused_before_waiting_for_build_admission_case,
+    );
+}
+fn uncorroborated_size_is_refused_before_waiting_for_build_admission_case() {
     let pool = BlockPool::with_defaults().unwrap();
     let mut buf = PacketBuf::new(pool.clone()).unwrap();
     let mut r = WholePacketReader::stream(
@@ -667,6 +748,12 @@ fn uncorroborated_size_is_refused_before_waiting_for_build_admission() {
 
 #[test]
 fn truncated_large_assembly_returns_and_trims_its_partial_block_too() {
+    watchdog(
+        Duration::from_secs(5),
+        truncated_large_assembly_returns_and_trims_its_partial_block_too_case,
+    );
+}
+fn truncated_large_assembly_returns_and_trims_its_partial_block_too_case() {
     let pool = BlockPool::with_defaults().unwrap();
     let mut buf = PacketBuf::new(pool.clone()).unwrap();
     let mut bytes = frame((10 * BLOCK_BYTES) as u32, 0, 9, 0);
@@ -698,6 +785,12 @@ impl<R: Read> Read for Counted<R> {
 }
 #[test]
 fn recovery_uses_chunk_reads_and_preserves_prefetched_frames_and_tail_counts() {
+    watchdog(
+        Duration::from_secs(5),
+        recovery_uses_chunk_reads_and_preserves_prefetched_frames_and_tail_counts_case,
+    );
+}
+fn recovery_uses_chunk_reads_and_preserves_prefetched_frames_and_tail_counts_case() {
     let pool = BlockPool::with_defaults().unwrap();
     let mut buf = PacketBuf::new(pool.clone()).unwrap();
     let mut bytes = vec![0x55; 100_000];
@@ -738,6 +831,12 @@ fn recovery_uses_chunk_reads_and_preserves_prefetched_frames_and_tail_counts() {
 }
 #[test]
 fn ordinary_maximum_body_is_not_split_into_artificial_io_quanta() {
+    watchdog(
+        Duration::from_secs(5),
+        ordinary_maximum_body_is_not_split_into_artificial_io_quanta_case,
+    );
+}
+fn ordinary_maximum_body_is_not_split_into_artificial_io_quanta_case() {
     let pool = BlockPool::with_defaults().unwrap();
     let mut buf = PacketBuf::new(pool.clone()).unwrap();
     let mut r = WholePacketReader::stream(
@@ -782,6 +881,12 @@ impl StableSource for Observed {
 }
 #[test]
 fn frame_feasibility_precedes_both_probe_and_known_short_drain() {
+    watchdog(
+        Duration::from_secs(5),
+        frame_feasibility_precedes_both_probe_and_known_short_drain_case,
+    );
+}
+fn frame_feasibility_precedes_both_probe_and_known_short_drain_case() {
     for short in [false, true] {
         let pool = BlockPool::new(BLOCK_BYTES + 65536).unwrap();
         let mut buf = PacketBuf::new(pool.clone()).unwrap();
@@ -819,6 +924,12 @@ fn frame_feasibility_precedes_both_probe_and_known_short_drain() {
 }
 #[test]
 fn growth_beyond_an_unchanged_stamp_is_source_changed() {
+    watchdog(
+        Duration::from_secs(5),
+        growth_beyond_an_unchanged_stamp_is_source_changed_case,
+    );
+}
+fn growth_beyond_an_unchanged_stamp_is_source_changed_case() {
     let pool = BlockPool::with_defaults().unwrap();
     let mut buf = PacketBuf::new(pool.clone()).unwrap();
     let mut r = WholePacketReader::seek_checked(
@@ -845,6 +956,12 @@ fn growth_beyond_an_unchanged_stamp_is_source_changed() {
 }
 #[test]
 fn exact_eof_mutation_between_snapshots_is_refused_before_body_storage() {
+    watchdog(
+        Duration::from_secs(5),
+        exact_eof_mutation_between_snapshots_is_refused_before_body_storage_case,
+    );
+}
+fn exact_eof_mutation_between_snapshots_is_refused_before_body_storage_case() {
     let pool = BlockPool::with_defaults().unwrap();
     let mut buf = PacketBuf::new(pool.clone()).unwrap();
     let mut r = WholePacketReader::seek_checked(
@@ -872,6 +989,9 @@ fn exact_eof_mutation_between_snapshots_is_refused_before_body_storage() {
 #[test]
 #[ignore = "bounded warm-cache file throughput evidence, explicit CI run"]
 fn bounded_file_read_benchmark() {
+    watchdog(Duration::from_secs(30), bounded_file_read_benchmark_case);
+}
+fn bounded_file_read_benchmark_case() {
     use std::{
         fs::{File, OpenOptions},
         io::Write,
@@ -932,6 +1052,12 @@ fn bounded_file_read_benchmark() {
 
 #[test]
 fn recovered_seekable_oversoft_frame_preserves_prefetch_during_probe_or_exact_eof() {
+    watchdog(
+        Duration::from_secs(5),
+        recovered_seekable_oversoft_frame_preserves_prefetch_during_probe_or_exact_eof_case,
+    );
+}
+fn recovered_seekable_oversoft_frame_preserves_prefetch_during_probe_or_exact_eof_case() {
     for final_frame in [false, true] {
         let pool = BlockPool::with_defaults().unwrap();
         let mut buf = PacketBuf::new(pool.clone()).unwrap();
@@ -983,6 +1109,12 @@ impl Read for RecoveryShort {
 }
 #[test]
 fn recovery_chunk_boundaries_and_short_interrupted_input_keep_exact_bytes() {
+    watchdog(
+        Duration::from_secs(5),
+        recovery_chunk_boundaries_and_short_interrupted_input_keep_exact_bytes_case,
+    );
+}
+fn recovery_chunk_boundaries_and_short_interrupted_input_keep_exact_bytes_case() {
     for short in [false, true] {
         let pool = BlockPool::with_defaults().unwrap();
         let mut buf = PacketBuf::new(pool.clone()).unwrap();
@@ -1006,184 +1138,5 @@ fn recovery_chunk_boundaries_and_short_interrupted_input_keep_exact_bytes() {
         }
         assert_eq!(buf.info().unwrap().offset, 8215);
         assert_eq!(buf.contiguous().unwrap(), frame(28, 0, 9, 0));
-    }
-}
-
-#[test]
-#[ignore = "owner decision evidence only; release-mode matrix runs explicitly in CI"]
-fn small_body_read_strategy_benchmark() {
-    use std::{
-        fs::{File, OpenOptions},
-        io::{BufReader, BufWriter, Write},
-        time::SystemTime,
-    };
-    const BUFFER: usize = 65_536;
-    // Exactly one counter read. Linux accounts that read after producing its
-    // snapshot; subtract its contribution from the following snapshot delta.
-    fn kernel_reads() -> Option<u64> {
-        #[cfg(target_os = "linux")]
-        {
-            let mut raw = [0; 512];
-            let n = File::open("/proc/thread-self/io")
-                .ok()?
-                .read(&mut raw)
-                .ok()?;
-            std::str::from_utf8(&raw[..n])
-                .ok()?
-                .lines()
-                .find_map(|line| line.strip_prefix("syscr: "))?
-                .trim()
-                .parse()
-                .ok()
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            None
-        }
-    }
-    struct Temp(std::path::PathBuf);
-    impl Drop for Temp {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-    struct Sample {
-        seconds: f64,
-        calls: usize,
-        kernel: Option<u64>,
-    }
-    fn measure<R: Read>(
-        input: R,
-        count: impl FnOnce(R) -> usize,
-        pool: &BlockPool,
-        buf: &mut PacketBuf,
-        packets: usize,
-        p: usize,
-    ) -> Sample {
-        let mut reader =
-            WholePacketReader::stream(input, WholePolicy::new(), pool.clone()).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(60);
-        let before = kernel_reads();
-        let start = Instant::now();
-        let mut seen = 0usize;
-        let mut digest = 0usize;
-        while let Some(event) = reader.next_packet_into(buf, deadline).unwrap() {
-            assert!(matches!(event, WholeEvent::Packet));
-            let bytes = std::hint::black_box(buf.contiguous().unwrap());
-            digest = digest.wrapping_add(usize::from(bytes[0]) + usize::from(bytes[p - 1]));
-            seen += 1;
-        }
-        let seconds = start.elapsed().as_secs_f64();
-        let after = kernel_reads();
-        let kernel = before.zip(after).map(|(a, b)| b - a - 1);
-        assert_eq!(seen, packets);
-        assert_eq!(digest, packets * (0x25 + 0x5a));
-        let calls = count(reader.into_inner());
-        #[cfg(target_os = "linux")]
-        assert_eq!(
-            kernel,
-            Some(calls as u64),
-            "kernel counter calibration / unexpected read syscalls"
-        );
-        Sample {
-            seconds,
-            calls,
-            kernel,
-        }
-    }
-    let target = std::env::var("IRIG106_SMALL_BODY_BENCH_BYTES")
-        .ok()
-        .map(|v| v.parse::<usize>().unwrap())
-        .unwrap_or(16 * 1024 * 1024);
-    assert!((524_288..=32 * 1024 * 1024).contains(&target));
-    println!(
-        "small_body benchmark: fixed 64 KiB buffered-copy prototype, median of 3, alternating order; generation/construction/first block initialization excluded; warm cache; EOF read included"
-    );
-    println!(
-        "small_body,size,mode,packets,bytes,source_reads,kernel_read_syscalls,seconds,packets_per_s,MB_per_s"
-    );
-    for (case, p) in [28usize, 400, 4096, 65_536, 524_288]
-        .into_iter()
-        .enumerate()
-    {
-        let packets = target / p;
-        let total = packets * p;
-        let stamp = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let name = format!(
-            "irig106-core-small-{}-{stamp}-{p}.bench",
-            std::process::id()
-        );
-        let path = Temp(std::env::temp_dir().join(name));
-        let mut output = BufWriter::with_capacity(
-            BUFFER,
-            OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&path.0)
-                .unwrap(),
-        );
-        let mut bytes = frame(p as u32, 0, 9, 0);
-        bytes[8..12].copy_from_slice(&((p - 24) as u32).to_le_bytes());
-        let checksum = bytes[..22].chunks_exact(2).fold(0u16, |sum, w| {
-            sum.wrapping_add(u16::from_le_bytes([w[0], w[1]]))
-        });
-        bytes[22..24].copy_from_slice(&checksum.to_le_bytes());
-        for _ in 0..packets {
-            output.write_all(&bytes).unwrap();
-        }
-        output.flush().unwrap();
-        drop(output);
-        let pool = BlockPool::with_defaults().unwrap();
-        let mut buf = PacketBuf::new(pool.clone()).unwrap();
-        let mut warm = pool.try_begin(1).unwrap();
-        drop(warm.try_next_block().unwrap());
-        drop(warm);
-        let mut samples: [Vec<Sample>; 2] = std::array::from_fn(|_| Vec::with_capacity(3));
-        for repetition in 0..3 {
-            for turn in 0..2 {
-                let mode = (case + repetition + turn) % 2;
-                let file = Counted {
-                    input: File::open(&path.0).unwrap(),
-                    calls: 0,
-                };
-                let sample = if mode == 0 {
-                    measure(file, |source| source.calls, &pool, &mut buf, packets, p)
-                } else {
-                    // Test-only prototype: same production reader; an external
-                    // fixed BufReader copies small bodies, bypasses large reads.
-                    measure(
-                        BufReader::with_capacity(BUFFER, file),
-                        |source| source.into_inner().calls,
-                        &pool,
-                        &mut buf,
-                        packets,
-                        p,
-                    )
-                };
-                samples[mode].push(sample);
-            }
-        }
-        for (index, mut group) in samples.into_iter().enumerate() {
-            group.sort_by(|a, b| a.seconds.total_cmp(&b.seconds));
-            let median = &group[1];
-            let mode = if index == 0 {
-                "direct"
-            } else {
-                "buffered_copy_64KiB"
-            };
-            let kernel = median
-                .kernel
-                .map_or_else(|| "unsupported".to_owned(), |n| n.to_string());
-            println!(
-                "small_body,{p},{mode},{packets},{total},{},{kernel},{:.6},{:.1},{:.1}",
-                median.calls,
-                median.seconds,
-                packets as f64 / median.seconds,
-                total as f64 / median.seconds / 1e6
-            );
-        }
     }
 }
