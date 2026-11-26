@@ -460,6 +460,14 @@ pub(crate) enum FrameStart {
 mod tests {
     use super::*;
     #[test]
+    fn whole_read_ahead_minimum_is_one_complete_primary_header() {
+        assert!(matches!(
+            PacketReader::whole(&[][..], None, 23),
+            Err(PoolError::InvalidRequest)
+        ));
+        assert!(PacketReader::whole(&[][..], None, 24).is_ok());
+    }
+    #[test]
     fn offset_overflow_is_typed_without_wrapping() {
         let mut reader = PacketReader::new(&[][..], ReaderLimits::default()).unwrap();
         reader.position = u64::MAX;
