@@ -40,6 +40,17 @@ def main(binary):
         "packets=5 status=Complete", "recording_index: Absent",
     ])
     assert out.index("control offset=56") < out.index("dispatch offset=56")
+    # INT-045: Time F2 (106-17+) updates context on ANY channel under 24R1.
+    for channel in [0, 3]:
+        out = run(binary, f"network-time-{channel}",
+                  frame(0, 1) + frame(channel, 0x12, int(channel == 0)) + frame(), 0, [
+            "control offset=0 revision=1", "control offset=28 revision=2",
+            "dispatch offset=56 channel=1 worker=1 revision=2",
+            f"worker=1 packets={1 + channel % 2} data_bytes={4 * (1 + channel % 2)} "
+            f"revision=2 revision_sum={2 * (1 + channel % 2)}",
+            "packets=3 status=Complete",
+        ])
+        assert out.index("control offset=28") < out.index("dispatch offset=28")
     run(binary, "burst", b"".join(frame(i % 2, 9, i // 2) for i in range(64)), 0,
         ["worker=0 packets=32", "worker=1 packets=32", "packets=64 status=Complete"])
     run(binary, "multispan", frame(0, 1, length=524292) + frame(), 0,
