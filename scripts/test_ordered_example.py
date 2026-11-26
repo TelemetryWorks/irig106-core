@@ -38,6 +38,7 @@ def main(binary):
         "worker=0 packets=3 data_bytes=12 revision=2 revision_sum=5",
         "worker=1 packets=2 data_bytes=8 revision=2 revision_sum=3",
         "packets=5 status=Complete", "recording_index: Absent",
+        "admission=AdmissionCounts { evaluated_packets: 5, over_soft: 0, within_soft: 5",
     ])
     assert out.index("control offset=56") < out.index("dispatch offset=56")
     # INT-045: Time F2 (106-17+) updates context on ANY channel under 24R1.

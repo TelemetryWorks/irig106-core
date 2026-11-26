@@ -91,3 +91,11 @@ Control revisions are illustrative notifications, not a downstream setup/time
 implementation. Read the [ordering and optional streaming contract](streaming.md)
 before integrating context, cancellation or output merging. CI executes independent
 stdin fixtures with an external timeout; downstream integration is still separate.
+
+
+The unreleased 0.2 examples append an `admission=AdmissionCounts { ... }` summary.
+Use Inspection::admission_counts() for typed counters rather than parsing Debug.
+Capture events have no authorization evidence, so capture-only evaluated_packets
+is zero even with nonzero totals. Whole PacketInfo contributes exactly once after
+successful inspection. Over-soft and legacy counts overlap the authorization
+partition; Unconfirmed(ExactEof) retains its uncertainty. See [API scope](api.md).

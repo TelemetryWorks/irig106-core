@@ -7,8 +7,10 @@ It uses the current whole-packet API, default H/B/hybrid policy, two fixed
 workers, four reusable PacketBuf owners and one bounded FIFO per worker.
 `channel % 2` keeps each channel on one FIFO. The producer observes every
 PacketInfo exactly once, in recording order, before fan-out; metadata inspection
-never waits for out-of-order worker results. No admission-evidence counters are
-added to the inventory; that owner question remains pending.
+never waits for out-of-order worker results. Owner decision 3A (2026-11-26) adds
+aggregate admission evidence through Inspection::admission_counts(); ordered
+prints it after successful whole-packet observations. Capture events carry no
+such evidence; evaluated_packets explicitly reports coverage.
 
 The default 106-24R1 example notices channel0/type01 setup and time types 0x11
 or 0x12 on **any channel**, attaching an increasing control revision to each

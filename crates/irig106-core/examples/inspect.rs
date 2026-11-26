@@ -45,12 +45,13 @@ fn main() -> ExitCode {
     };
     let counts = inventory.totals();
     println!(
-        "packets={} data_bytes={} packet_bytes={} status={:?} presence={:?}",
+        "packets={} data_bytes={} packet_bytes={} status={:?} presence={:?} admission={:?}",
         counts.packets,
         counts.data_bytes,
         counts.packet_bytes,
         inventory.status(),
-        inventory.presence()
+        inventory.presence(),
+        inventory.admission_counts()
     );
     if let Some(error) = failure {
         eprintln!("{error}");
