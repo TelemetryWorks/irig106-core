@@ -261,7 +261,7 @@ fn recovery_and_structural_refusals_keep_typed_evidence() {
 }
 struct Stable {
     bytes: Cursor<Vec<u8>>,
-    mutate: bool,
+    mutation_at: Option<u64>,
 }
 impl Read for Stable {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
@@ -279,7 +279,10 @@ impl StableSource for Stable {
         Ok(SourceStamp::new(
             self.bytes.get_ref().len() as u64,
             1,
-            u128::from(self.mutate && self.bytes.position() > 24),
+            u128::from(
+                self.mutation_at
+                    .is_some_and(|at| self.bytes.position() >= at),
+            ),
         ))
     }
 }
@@ -289,7 +292,7 @@ fn source_change_aborts_and_expired_deadline_reads_nothing() {
     let mut r = WholePacketReader::seek_checked(
         Stable {
             bytes: Cursor::new(frame(48)),
-            mutate: true,
+            mutation_at: Some(25),
         },
         WholePolicy::new(),
         pool.clone(),
@@ -345,4 +348,60 @@ fn huge_claim_on_short_input_uses_u64_progress_on_32_bit_too() {
         matches!(d.reason, DrainReason::BudgetTooSmall { .. })
     });
     assert_eq!(pool.stats().unwrap().allocated_blocks, 0);
+}
+
+#[test]
+fn hard_ceiling_is_inclusive_for_explicit_drain_reason() {
+    support::watchdog(Duration::from_secs(5), || {
+        const H: u32 = 68;
+        for p in [H, H + 4] {
+            let pool = BlockPool::with_defaults().unwrap();
+            let mut r = WholePacketReader::stream(
+                Cursor::new(frame(p as usize)),
+                WholePolicy::new().with_hard_limit(H),
+                pool,
+            )
+            .unwrap();
+            let d = report(r.drain_next(deadline()).unwrap());
+            assert_eq!(
+                (d.requested_bytes, d.consumed_bytes, d.disposition),
+                (u64::from(p), u64::from(p), DrainDisposition::Drained)
+            );
+            if p == H {
+                assert_eq!(d.reason, DrainReason::CallerRequested);
+            } else {
+                assert!(matches!(d.reason,DrainReason::HardLimit{length,limit,..}
+                    if length==H+4 && limit==H));
+            }
+        }
+    });
+}
+
+#[test]
+fn source_mutation_after_first_quantum_aborts_before_reading_remainder() {
+    support::watchdog(Duration::from_secs(5), || {
+        const QUANTUM: usize = 4096;
+        let requested = 24 + 3 * QUANTUM;
+        let pool = BlockPool::with_defaults().unwrap();
+        let input = Stable {
+            bytes: Cursor::new(frame(requested)),
+            mutation_at: Some((24 + QUANTUM) as u64),
+        };
+        let mut r = WholePacketReader::seek_checked(input, WholePolicy::new(), pool).unwrap();
+        let e = r.drain_next(deadline()).unwrap_err();
+        assert!(matches!(
+            e.error.reason,
+            ErrorKind::Admission {
+                source: AdmissionError::SourceChanged,
+                ..
+            }
+        ));
+        let d = e.report.unwrap();
+        assert_eq!(d.disposition, DrainDisposition::Aborted);
+        assert_eq!(d.requested_bytes, requested as u64);
+        assert_eq!(d.consumed_bytes, (24 + QUANTUM) as u64);
+        assert!(d.consumed_bytes < d.requested_bytes);
+        assert_eq!(e.error.position, d.offset + d.consumed_bytes);
+        assert!(r.drain_next(deadline()).unwrap().is_none());
+    });
 }

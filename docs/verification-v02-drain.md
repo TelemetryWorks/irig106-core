@@ -42,6 +42,17 @@ CI's new 64 MiB synthetic drain case holds zero blocks and resumes at the next
 frame under the 12 MiB all-OS memory ceiling; all old gates stay unchanged.
 Eight temporary controls fail with assertion panics/exit101: wrong H/B reason,
 secondary-header remainder error, invented consumed bytes, nonterminal truncation,
-omitted source checks, omitted final deadline checks and missing framing commit.
+all post-read unchanged() checks removed, all explicit boundary deadline checks
+removed (inner read/retry hooks retained), and missing framing commit. Removing
+one redundant final source/deadline check alone is not claimed killed.
 All mutations were discarded. CI run IDs and measured peaks are recorded in the PR.
 No merge, tag, publication, chunk implementation or new dependency in this PR.
+
+
+Review follow-up (tests only; refusal/drain API decision held): D1 pins P == H
+as CallerRequested when B fits and P == H+4 as HardLimit. D3 changes a stable
+source stamp at the end of its first 4 KiB body quantum in a three-quantum frame;
+SourceChanged/Aborted must report only header+one quantum consumed, strictly less
+than requested. This pins the purpose of the current per-quantum source recheck,
+without changing the I/O/stamping strategy. The new tests kill >= at H and removal
+of only the per-quantum unchanged() call, while retaining the final check.
