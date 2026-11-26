@@ -202,9 +202,17 @@ use std::{
     alloc::{GlobalAlloc, Layout, System},
     cell::Cell,
 };
-thread_local! {static ALLOCATIONS:Cell<Option<usize>>=const {Cell::new(None)};}
+thread_local! {
+    static ALLOCATIONS:Cell<Option<usize>>=const {Cell::new(None)};
+    static LARGEST_ALLOCATION:Cell<Option<usize>>=const {Cell::new(None)};
+}
 struct Counter;
-fn count() {
+fn count(size: usize) {
+    let _ = LARGEST_ALLOCATION.try_with(|c| {
+        if let Some(previous) = c.get() {
+            c.set(Some(previous.max(size)));
+        }
+    });
     let _ = ALLOCATIONS.try_with(|c| {
         if let Some(n) = c.get() {
             c.set(Some(n + 1));
@@ -213,14 +221,14 @@ fn count() {
 }
 unsafe impl GlobalAlloc for Counter {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
-        count();
+        count(l.size());
         unsafe { System.alloc(l) }
     }
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
         unsafe { System.dealloc(p, l) }
     }
     unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
-        count();
+        count(n);
         unsafe { System.realloc(p, l, n) }
     }
 }
@@ -1842,6 +1850,54 @@ fn target_sized_limits_fail_before_payload_allocation() {
             ));
             assert_eq!(pool.stats().unwrap().allocated_blocks, 0);
             assert!(buf.info().is_none());
+        }
+    });
+}
+
+#[test]
+fn refused_coalescing_never_reserves_frame_storage() {
+    watchdog(Duration::from_secs(5), || {
+        let p = BLOCK_BYTES + 28;
+        for short in [true, false] {
+            let pool = BlockPool::new(if short {
+                2 * BLOCK_BYTES + 131072
+            } else {
+                4 * BLOCK_BYTES + 131072
+            })
+            .unwrap();
+            let mut buf = PacketBuf::new(pool.clone()).unwrap();
+            let mut reader = WholePacketReader::stream(
+                Cursor::new(frame(p as u32, 0, 1, 0)),
+                WholePolicy::new(),
+                pool.clone(),
+            )
+            .unwrap();
+            reader.next_packet_into(&mut buf, deadline()).unwrap();
+            let held = if short {
+                None
+            } else {
+                let mut build = pool.try_begin(2).unwrap();
+                Some([
+                    build.try_next_block().unwrap(),
+                    build.try_next_block().unwrap(),
+                ])
+            };
+            let end = deadline();
+            LARGEST_ALLOCATION.with(|c| c.set(Some(0)));
+            let result = buf.coalesce_until(end);
+            let largest = LARGEST_ALLOCATION.with(|c| c.replace(None).unwrap());
+            assert!(if short {
+                matches!(result, Err(PoolError::BudgetTooSmall { .. }))
+            } else {
+                matches!(result, Err(PoolError::WouldBlock))
+            });
+            assert!(
+                largest < p,
+                "refusal requested {largest} bytes for frame {p}"
+            );
+            assert_eq!(pool.stats().unwrap().coalesced_bytes, 0);
+            assert!(buf.info().is_some());
+            drop(held);
         }
     });
 }
