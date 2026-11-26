@@ -105,11 +105,13 @@ impl Read for Fill {
 }
 fn main() -> Result<(), Box<dyn StdError>> {
     let case = std::env::args().nth(1).ok_or("expected case")?;
-    let pool = BlockPool::new(if case == "pressure" {
-        16 * MIB
-    } else {
-        DEFAULT_POOL_BUDGET
-    })?;
+    let pool = BlockPool::new(
+        if matches!(case.as_str(), "pressure" | "pressure-baseline") {
+            16 * MIB
+        } else {
+            DEFAULT_POOL_BUDGET
+        },
+    )?;
     let mut buf = PacketBuf::new(pool.clone())?;
     if case == "recovery" {
         let gap = 48 * MIB as u64;
@@ -153,7 +155,7 @@ fn main() -> Result<(), Box<dyn StdError>> {
         assert!(buf.info().is_none());
         assert!(pool.stats()?.allocated_blocks <= 1);
         checkpoint("short", &pool)?;
-    } else if case == "pressure" {
+    } else if matches!(case.as_str(), "pressure" | "pressure-baseline") {
         let source = Synthetic {
             p: 4 * MIB as u32,
             count: 4,
@@ -167,6 +169,9 @@ fn main() -> Result<(), Box<dyn StdError>> {
             pool.clone(),
         )?;
         checkpoint("cold", &pool)?;
+        if case == "pressure-baseline" {
+            return Ok(()); // Identical B/reader construction, no packet allocation.
+        }
         let mut held = Vec::new(); // Three fixed owners, not recording history.
         for _ in 0..3 {
             let mut packet = PacketBuf::new(pool.clone())?;
