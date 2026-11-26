@@ -10,11 +10,18 @@ Ordinary-return hysteresis makes the same allocation-counter check pass. This
 reproduces a proposed-pool tension, not a bug in the released reader. Worker
 mailboxes, barriers and oracle storage are allocated before measurement.
 The unsafe System allocator shim is test instrumentation only; the library still
-forbids unsafe. Block geometry/default B are approved design inputs, not an encoder.
+forbids unsafe. Block geometry/default B are reviewed design inputs, not an encoder.
+
+Initial macOS CI at 643f8a7 saw two process-wide allocations during the counter
+window, which also covered the synchronization oracle. Counting now scopes all
+producer acquisition/permit-drop and worker block-drop operations with per-thread
+markers, excludes mailbox/barrier code, and pre-warms every worker's admission
+wait. The scoped counter still kills the eager-trim mutant with 16 allocations;
+the mutant was removed. No macOS-specific allowance or nonzero threshold is used.
 
 | Check | Scoped requirement evidence |
 | --- | --- |
-| tests/pool.rs burst | Partial L3-HOT-008: four workers, 16-to-zero swings, zero **all** allocations over two warmed bursts; ordinary returns retain 16, explicit pressure trims to eight. No whole-reader throughput claim. |
+| tests/pool.rs burst | Partial L3-HOT-008: four workers, 16-to-zero swings, zero heap allocations inside producer/worker **pool operations** over two warmed bursts; ordinary returns retain 16, explicit pressure trims to eight. No whole-reader throughput claim. |
 | tests/pool.rs budget/lifecycle | Partial L3-BUD/DEFAULT-008: lazy zero-block construction, B=256 MiB and block=512 KiB; idle/live credits; impossible request before waiting; exclusive admission; actual return wakes checkout; terminal cancel wakes both waits; nine-block return plus explicit trim yields eight. |
 | pool unit probes + doctest | Failed reservation and capacity mismatch roll back credits; poison is typed and Drop does not panic; borrow cannot outlive returned block; owned storage/handles are Send. |
 

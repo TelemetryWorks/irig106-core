@@ -2,6 +2,7 @@
 use irig106_core::{BLOCK_BYTES, BlockPool, DEFAULT_POOL_BUDGET, PoolError, PoolStats};
 use std::{
     alloc::{GlobalAlloc, Layout, System},
+    cell::Cell,
     sync::{
         Arc, Barrier, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed},
@@ -12,29 +13,46 @@ use std::{
 struct Counter;
 static COUNT: AtomicBool = AtomicBool::new(false);
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
+static TOTAL: AtomicUsize = AtomicUsize::new(0);
+thread_local! { static IN_POOL: Cell<bool> = const { Cell::new(false) }; }
+fn measured<T>(operation: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            IN_POOL.with(|flag| flag.set(false));
+        }
+    }
+    IN_POOL.with(|flag| flag.set(true));
+    let _reset = Reset;
+    operation()
+}
+fn allocation() {
+    if COUNT.load(Relaxed) {
+        TOTAL.fetch_add(1, Relaxed);
+        if IN_POOL.try_with(Cell::get).unwrap_or(false) {
+            ALLOCS.fetch_add(1, Relaxed);
+        }
+    }
+}
 // Instrumentation only; the library continues to forbid unsafe code.
 unsafe impl GlobalAlloc for Counter {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if COUNT.load(Relaxed) {
-            ALLOCS.fetch_add(1, Relaxed);
-        }
+        allocation();
         unsafe { System.alloc(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         unsafe { System.dealloc(ptr, layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        if COUNT.load(Relaxed) {
-            ALLOCS.fetch_add(1, Relaxed);
-        }
+        allocation();
         unsafe { System.realloc(ptr, layout, size) }
     }
 }
 #[global_allocator]
 static A: Counter = Counter;
-fn waiting(pool: &BlockPool) {
+fn waiting(pool: &BlockPool, count: usize) {
     let deadline = Instant::now() + Duration::from_secs(5);
-    while pool.stats().unwrap().waiting == 0 {
+    while pool.stats().unwrap().waiting < count {
         assert!(
             Instant::now() < deadline,
             "worker did not enter a bounded wait"
@@ -43,6 +61,8 @@ fn waiting(pool: &BlockPool) {
     }
 }
 fn burst(pool: &BlockPool) {
+    let warm_admission = pool.begin(1).unwrap();
+    let warm_ready = Arc::new(Barrier::new(5));
     let slots = Arc::new(Mutex::new(std::array::from_fn::<_, 16, _>(|_| None)));
     let start = Arc::new(Barrier::new(5));
     let release = Arc::new(Barrier::new(5));
@@ -57,7 +77,10 @@ fn burst(pool: &BlockPool) {
                 returned.clone(),
                 finish.clone(),
             );
+            let warm_ready = warm_ready.clone();
             scope.spawn(move || {
+                drop(pool.begin(1).unwrap());
+                warm_ready.wait();
                 for _ in 0..3 {
                     start.wait();
                     let blocks: [irig106_core::PooledBlock; 4] = {
@@ -65,24 +88,30 @@ fn burst(pool: &BlockPool) {
                         std::array::from_fn(|i| slots[4 * worker + i].take().unwrap())
                     };
                     release.wait();
-                    drop(blocks);
+                    measured(|| drop(blocks));
                     returned.wait();
                 }
                 finish.wait();
             });
         }
+        waiting(pool, 4);
+        drop(warm_admission);
+        warm_ready.wait();
         for round in 0..3 {
             if round == 1 {
+                TOTAL.store(0, Relaxed);
                 ALLOCS.store(0, Relaxed);
                 COUNT.store(true, Relaxed);
             }
             {
                 let mut slots = slots.lock().unwrap();
                 for index in 0..16 {
-                    let mut assembly = pool.begin(1).unwrap();
-                    let mut block = assembly.next_block().unwrap();
-                    block.storage_mut()[0] = index as u8;
-                    slots[index] = Some(block);
+                    measured(|| {
+                        let mut assembly = pool.begin(1).unwrap();
+                        let mut block = assembly.next_block().unwrap();
+                        block.storage_mut()[0] = index as u8;
+                        slots[index] = Some(block);
+                    });
                 }
             }
             start.wait();
@@ -92,7 +121,12 @@ fn burst(pool: &BlockPool) {
         COUNT.store(false, Relaxed);
         let allocations = ALLOCS.load(Relaxed);
         finish.wait();
-        assert_eq!(allocations, 0, "ordinary burst reallocated after warm-up");
+        assert_eq!(
+            allocations,
+            0,
+            "pool reallocated after warm-up; process/harness allocations: {}",
+            TOTAL.load(Relaxed)
+        );
         assert_eq!(pool.stats().unwrap().idle_blocks, 16);
     });
 }
@@ -160,11 +194,11 @@ fn bounded_pool_ownership_pressure_cancellation_and_burst_hysteresis() {
     ));
     thread::scope(|scope| {
         let next = scope.spawn(|| small.begin(1));
-        waiting(&small); // Exclusive assembly admission must wait.
+        waiting(&small, 1); // Exclusive assembly admission must wait.
         drop(first);
         let mut next = next.join().unwrap().unwrap();
         let checkout = scope.spawn(move || next.next_block());
-        waiting(&small); // Worker owns the only block; budget cannot grow.
+        waiting(&small, 1); // Worker owns the only block; budget cannot grow.
         assert!(small.stats().unwrap().used_bytes <= BLOCK_BYTES + 4096);
         drop(block);
         drop(checkout.join().unwrap().unwrap());
@@ -173,7 +207,7 @@ fn bounded_pool_ownership_pressure_cancellation_and_burst_hysteresis() {
     let owner = admission.begin(1).unwrap();
     thread::scope(|scope| {
         let pending = scope.spawn(|| admission.begin(1));
-        waiting(&admission);
+        waiting(&admission, 1);
         admission.cancel().unwrap();
         assert!(matches!(pending.join().unwrap(), Err(PoolError::Cancelled)));
     });
@@ -186,7 +220,7 @@ fn bounded_pool_ownership_pressure_cancellation_and_burst_hysteresis() {
             let mut a = small.begin(1)?;
             a.next_block()
         });
-        waiting(&small);
+        waiting(&small, 1);
         small.cancel().unwrap();
         assert!(matches!(pending.join().unwrap(), Err(PoolError::Cancelled)));
     });
