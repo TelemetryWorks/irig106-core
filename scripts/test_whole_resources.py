@@ -11,6 +11,13 @@ class WholeResources(unittest.TestCase):
             with self.subTest(changed=changed, rss=rss), self.assertRaises(AssertionError):
                 validate(sample | changed, rss, 32768)
 
+    def test_recovery_keeps_one_block(self):
+        sample = dict(phase="recovered", pid="1", budget="268435456", used="600000", blocks="1", idle="0")
+        validate(sample, 3000, 32768)
+        validate(sample | dict(phase="tail", idle="1"), 3000, 32768)
+        with self.assertRaises(AssertionError):
+            validate(sample | dict(blocks="2", used="1200000"), 3000, 32768)
+
     def test_pressure_requires_full_budget_and_trim(self):
         sample = dict(phase="blocked", pid="1", budget="16777216", used="16254000", blocks="31", idle="0")
         validate(sample, 20000, 32768)

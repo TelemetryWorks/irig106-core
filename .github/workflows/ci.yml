@@ -160,9 +160,6 @@ jobs:
           toolchain: stable
       - run: cargo build --release -p irig106-core --example whole_resources --locked
       - run: python3 scripts/check_whole_resources.py target/release/examples/whole_resources${{ runner.os == 'Windows' && '.exe' || '' }}
-      - name: One-off memory controls (discard after evidence)
-        if: runner.os == 'Linux'
-        run: python3 scripts/control_whole_resources.py
 
   target32:
     name: Executed 32-bit Windows tests

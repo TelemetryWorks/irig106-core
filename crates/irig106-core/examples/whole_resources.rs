@@ -94,6 +94,15 @@ fn checkpoint(phase: &str, pool: &BlockPool) -> Result<(), Box<dyn StdError>> {
     assert_eq!(ack, [b'+']);
     Ok(())
 }
+struct Fill(u64);
+impl Read for Fill {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        let n = out.len().min(self.0 as usize);
+        out[..n].fill(0xff);
+        self.0 -= n as u64;
+        Ok(n)
+    }
+}
 fn main() -> Result<(), Box<dyn StdError>> {
     let case = std::env::args().nth(1).ok_or("expected case")?;
     let pool = BlockPool::new(if case == "pressure" {
@@ -102,7 +111,32 @@ fn main() -> Result<(), Box<dyn StdError>> {
         DEFAULT_POOL_BUDGET
     })?;
     let mut buf = PacketBuf::new(pool.clone())?;
-    if case == "bogus" {
+    if case == "recovery" {
+        let gap = 48 * MIB as u64;
+        let mut small = [0x5a; 28];
+        small[..24].copy_from_slice(&header(28, 9));
+        let input = Cursor::new(small)
+            .chain(Fill(gap))
+            .chain(Cursor::new(small))
+            .chain(Fill(gap));
+        let mut reader = WholePacketReader::stream(input, WholePolicy::new(), pool.clone())?;
+        checkpoint("cold", &pool)?;
+        for recovered in [0, gap] {
+            assert!(matches!(
+                reader.next_packet_into(&mut buf, deadline())?,
+                Some(WholeEvent::Packet)
+            ));
+            let info = buf.info().unwrap();
+            assert_eq!(info.recovered_bytes, recovered);
+            assert_eq!(info.offset, if recovered == 0 { 0 } else { gap + 28 });
+        }
+        checkpoint("recovered", &pool)?;
+        assert!(matches!(reader.next_packet_into(&mut buf, deadline())?,
+            Some(WholeEvent::Tail {tail, recovery: Some(r), ..}) if tail.bytes == gap && r.scanned_bytes == gap - 24));
+        assert!(buf.info().is_none());
+        checkpoint("tail", &pool)?;
+        assert!(reader.next_packet_into(&mut buf, deadline())?.is_none());
+    } else if case == "bogus" {
         let mut bytes = [0x5a; 28];
         bytes[..24].copy_from_slice(&header(128 * MIB as u32, 9));
         let mut reader = WholePacketReader::stream(

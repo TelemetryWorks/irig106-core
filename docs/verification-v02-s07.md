@@ -21,6 +21,7 @@ samples the still-live process. Collection, acknowledgements and joins are bound
 | Oversoft admitted | 64 MiB ordinary frame, valid next primary header at declared end: NextHeader evidence, 128 complete spans, exact DATA bytes, next frame offset and EOF. | 80 MiB |
 | Maximum setup | 128 MiB channel0/type01, default H/B, WithinSoft, 256 complete spans and exact DATA; next frame and EOF. | 144 MiB |
 | Oversoft refused | Same declared 64 MiB frame but invalid following header; Uncorroborated, zero payload blocks. | 32 MiB |
+| Recovery/padding | Two 28-byte frames around a 48 MiB recovery gap, then 48 MiB padding. Exact offsets/recovered/tail/scanned counts, only one retained block and terminal EOF. | 32 MiB |
 | Budget pressure | B=16 MiB, three held 4 MiB packets; fourth build waits at 31 allocated blocks/zero idle, used <= B. Returning one wakes completion; explicit trim retains eight. | 32 MiB |
 
 Large gates allow payload plus a fixed 16 MiB process/allocator/stack margin;
@@ -60,3 +61,16 @@ API/requirements coverage is partial until owner-held chunk/drain/coalescing
 scope is resolved; admission-evidence aggregation remains pending. Coalescing's
 L3-SETUP obligation is not discharged by the accepted 128 MiB segmented case.
 No release candidate, version bump, tag or publication is authorized by this PR.
+
+
+## One-off controls, then removed
+
+[CI 45847406093](https://github.com/TelemetryWorks/irig106-core/actions/runs/45847406093),
+head acd8fd0, Linux whole-memory job 140004541480: a real-library Vec<u8>
+preallocation/zero-fill from declared P on the 28-byte bogus stream measured
+133,856 KiB against 32,768; unbudgeted full-frame retention during PacketBuf::clear
+measured 133,892 KiB against 81,920. Both failed specifically via the memory-ceiling
+oracle. Each built in a separate temporary target directory, restoring source in
+finally; the one-off control script/CI step were removed from the final tree.
+Recipes remain reproducible in that historical head. These scoped controls do
+not prove immunity to all allocator/platform failures or virtual-only reserves.

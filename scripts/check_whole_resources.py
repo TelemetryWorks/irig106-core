@@ -9,10 +9,10 @@ import sys
 import tempfile
 import threading
 
-CASES = {"bogus": 32, "admit": 80, "setup": 144, "refuse": 32, "pressure": 32}
+CASES = {"bogus": 32, "admit": 80, "setup": 144, "refuse": 32, "pressure": 32, "recovery": 32}
 PHASES = {"bogus": ["cold", "short"], "admit": ["cold", "accepted", "trimmed"],
           "setup": ["cold", "accepted", "trimmed"], "refuse": ["cold", "refused"],
-          "pressure": ["cold", "blocked", "trimmed"]}
+          "pressure": ["cold", "blocked", "trimmed"], "recovery": ["cold", "recovered", "tail"]}
 
 
 class MemoryCeilingExceeded(AssertionError):
@@ -30,7 +30,7 @@ def validate(sample, memory_kib, ceiling_kib):
     phase = sample["phase"]
     if phase in ["cold", "refused"]:
         assert blocks == 0, sample
-    elif phase == "short":
+    elif phase in ["short", "recovered", "tail"]:
         assert blocks <= 1, sample
     elif phase == "blocked":
         assert blocks == 31 and idle == 0, sample
