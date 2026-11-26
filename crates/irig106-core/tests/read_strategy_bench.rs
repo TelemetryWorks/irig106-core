@@ -1,4 +1,4 @@
-//! Decision-only small-body read benchmark; production strategy is unchanged.
+//! Actual hybrid implementation versus its configured direct-read baseline.
 use irig106_core::*;
 use std::{
     io::{self, Read},
@@ -45,10 +45,9 @@ fn small_body_read_strategy_benchmark() {
 fn small_body_read_strategy_benchmark_case() {
     use std::{
         fs::{File, OpenOptions},
-        io::{BufReader, BufWriter, Write},
+        io::{BufWriter, Write},
         time::SystemTime,
     };
-    const BUFFER: usize = 65_536;
     // Exactly one counter read. Linux accounts that read after producing its
     // snapshot; subtract its contribution from the following snapshot delta.
     fn kernel_reads() -> Option<u64> {
@@ -90,9 +89,9 @@ fn small_body_read_strategy_benchmark_case() {
         buf: &mut PacketBuf,
         packets: usize,
         p: usize,
+        policy: WholePolicy,
     ) -> Sample {
-        let mut reader =
-            WholePacketReader::stream(input, WholePolicy::new(), pool.clone()).unwrap();
+        let mut reader = WholePacketReader::stream(input, policy, pool.clone()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(60);
         let before = kernel_reads();
         let start = Instant::now();
@@ -128,7 +127,7 @@ fn small_body_read_strategy_benchmark_case() {
         .unwrap_or(16 * 1024 * 1024);
     assert!((524_288..=32 * 1024 * 1024).contains(&target));
     println!(
-        "small_body benchmark: fixed 64 KiB buffered-copy prototype, median of 3, alternating order; generation/construction/first block initialization excluded; warm cache; EOF read included"
+        "small_body benchmark: actual hybrid (64 KiB, cutoff 4 KiB) versus direct baseline (24-byte header buffer, cutoff 0), median of 3, alternating order; generation/construction/first block initialization excluded; warm cache; EOF read included"
     );
     println!(
         "small_body,size,mode,packets,bytes,source_reads,kernel_read_syscalls,seconds,packets_per_s,MB_per_s"
@@ -149,7 +148,7 @@ fn small_body_read_strategy_benchmark_case() {
         );
         let path = Temp(std::env::temp_dir().join(name));
         let mut output = BufWriter::with_capacity(
-            BUFFER,
+            65_536,
             OpenOptions::new()
                 .create_new(true)
                 .write(true)
@@ -180,20 +179,22 @@ fn small_body_read_strategy_benchmark_case() {
                     input: File::open(&path.0).unwrap(),
                     calls: 0,
                 };
-                let sample = if mode == 0 {
-                    measure(file, |source| source.calls, &pool, &mut buf, packets, p)
+                let policy = if mode == 0 {
+                    WholePolicy::new()
+                        .with_read_ahead_bytes(24)
+                        .with_small_body_cutoff(0)
                 } else {
-                    // Test-only prototype: same production reader; an external
-                    // fixed BufReader copies small bodies, bypasses large reads.
-                    measure(
-                        BufReader::with_capacity(BUFFER, file),
-                        |source| source.into_inner().calls,
-                        &pool,
-                        &mut buf,
-                        packets,
-                        p,
-                    )
+                    WholePolicy::new()
                 };
+                let sample = measure(
+                    file,
+                    |source| source.calls,
+                    &pool,
+                    &mut buf,
+                    packets,
+                    p,
+                    policy,
+                );
                 samples[mode].push(sample);
             }
         }
@@ -203,7 +204,7 @@ fn small_body_read_strategy_benchmark_case() {
             let mode = if index == 0 {
                 "direct"
             } else {
-                "buffered_copy_64KiB"
+                "hybrid_64KiB_cutoff4KiB"
             };
             let kernel = median
                 .kernel

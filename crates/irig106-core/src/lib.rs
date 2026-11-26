@@ -50,7 +50,8 @@ pub use pool::{
 };
 
 pub use admission::{
-    AdmissionError, AdmissionEvidence, Authorization, DEFAULT_HARD_LIMIT, EditionPolicy,
-    SourceStamp, StableSource, UnconfirmedReason, WholePolicy,
+    AdmissionError, AdmissionEvidence, Authorization, DEFAULT_HARD_LIMIT, DEFAULT_READ_AHEAD_BYTES,
+    DEFAULT_SMALL_BODY_CUTOFF, EditionPolicy, SourceStamp, StableSource, UnconfirmedReason,
+    WholePolicy,
 };
 pub use whole::{PacketBuf, PacketInfo, WholeEvent, WholePacketReader};

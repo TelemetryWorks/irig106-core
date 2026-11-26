@@ -248,25 +248,34 @@ Wait deadlines bound pool waits, not a blocking source's Read/Seek.
 DeadlineExceeded or Cancelled from next_packet_into is terminal: the header and
 possibly body bytes have already been consumed, PacketBuf is cleared, and calling
 again returns None. Returning credits does not resume the interrupted frame.
-into_inner discards recovery read-ahead; its physical cursor may be up to 8 KiB
+into_inner discards recovery read-ahead; its physical cursor may be up to the configured buffer capacity
 past position(). A caller restarting must explicitly establish a frame boundary,
 not retry from the reported consumed position or assume the source was rewound.
 The low-level pool deadline API remains reusable after timeout; this reader's
 consumed-input contract is different. Error::kind maps Cancelled and permanent
 BudgetUnavailable to Other, not retryable Interrupted/WouldBlock.
 
-The shared framing engine uses a zero-capacity input wrapper in this mode:
-normal header reads use fixed primary scratch; ordinary bodies bypass buffering
-into final pooled slices bounded by remaining block/frame (at most 512 KiB).
-Recovery alone reads fixed 8 KiB scratch chunks, charged to B at construction.
-Bytes prefetched after a recovered header are copied from that bounded scratch;
-the remainder goes directly into final storage. The next header may also lie in
-this recovery read-ahead. Logical position/recovery counts advance on consumption,
-not prefetch. Seek probes preserve this pending scratch and restore the physical
-source cursor. No normal-path body read-ahead or second body staging buffer is
-introduced. One-block ordinary packets stay contiguous. Additional blocks are acquired only
-after the preceding one fills. Interrupted reads retry in place. The existing
-0.1 input buffer/capture behavior is unchanged.
+WholePolicy defaults to one fallibly reserved **64 KiB read-ahead buffer**, charged
+to B, and a **4 KiB body cutoff**. Set with_read_ahead_bytes(bytes) (at least 24,
+target/B-representable) and with_small_body_cutoff(bytes); getters expose both.
+The size is fixed at construction, never derived from a header. Headers/recovery
+share it. Already-buffered bytes (including large prefixes) copy to pooled blocks;
+a body strictly below the cutoff may refill through it and copy. A fully buffered
+body copies regardless of cutoff. This two-copy path is owner-approved 2026-11-26.
+
+Larger bodies drain pending bytes, then read directly into pooled frame/block
+remainders. The decision uses the complete body (P minus 24, including secondary/
+trailer) once; short reads and tiny final blocks do not switch back to buffering.
+Cutoff zero disables size-triggered refills; buffer 24/cutoff zero supplies the
+benchmark's direct-body baseline. Logical offsets/recovery counts reflect bytes
+consumed, not prefetch. Probes preserve pending bytes and restore the physical
+source cursor. One-block ordinary frames stay contiguous. Interrupted reads retry
+in place. The 0.1 buffered-capture path is unchanged.
+
+SeekChecked snapshots source identity/size/revision before any read-ahead. Later
+checks compare that baseline, including changes during initial prefetch; body-end
+checks still protect delivery. The adapter must exclude undetectable same-size
+concurrent writes. Exact EOF and known-short truncation retain their evidence.
 
 PacketBuf descriptors are reserved fallibly from pool geometry at construction,
 charged alongside reader control/scratch via workspace leases. Payload is not

@@ -1,5 +1,10 @@
 # Core 0.2 slice 3: reader/admission integration
 
+Historical record: the direct/small-body HOLD below is superseded by the owner
+2026-11-26 Option A. See [current hybrid evidence](verification-v02-hybrid.md).
+The recorded prototype measurements remain historical; the current harness now
+compares the actual implementation with a configured direct-body baseline.
+
 Base: main 1b86a4a (merged #18). Version remains 0.1.0; no release action.
 Owner assignment requests reader/admission integration with the direct-read hot
 path. This PR therefore includes the minimal whole-frame path originally listed
