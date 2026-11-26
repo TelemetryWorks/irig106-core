@@ -452,3 +452,14 @@ Next is slice 6's ordered consumer examples/optional streaming contract, then
 slice 7's resource/platform/performance qualification. Explicit coalescing and
 opt-in drain/chunk delivery remain unimplemented; this metadata bridge does not
 claim those obligations or full 0.2 qualification.
+
+
+## Slice 6 consumer boundary
+
+The [ordered example and optional streaming contract](streaming.md) demonstrate
+complete-packet ownership fan-out, ordered inspection/control notifications,
+bounded return queues and safe shutdown with the existing API. Begin/Chunk/End/
+Abort and explicit drain are documented contracts only; their delivery APIs,
+coalescing and slice-7 resource/platform qualification remain outstanding.
+No inventory admission counters or geometric refill strategy are introduced.
+See [slice-6 evidence](verification-v02-s06.md).
