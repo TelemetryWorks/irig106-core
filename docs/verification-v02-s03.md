@@ -130,7 +130,7 @@ warm-cache file results, not physical-disk or decode throughput.
 Reproduce the default qualification (CI, bounded to <=32 MiB per corpus):
 
 ```sh
-CARGO_BUILD_JOBS=2 cargo test --release -p irig106-core --test read_strategy_bench --locked small_body_read_strategy_benchmark -- --ignored --exact --nocapture
+CARGO_BUILD_JOBS=2 cargo test --release -p irig106-core --test whole --locked small_body_read_strategy_benchmark -- --ignored --exact --nocapture
 ```
 
 A local smoke run uses IRIG106_SMALL_BODY_BENCH_BYTES=1048576 in a debug build;
@@ -138,7 +138,3 @@ all ten size/mode pairs passed kernel-counter calibration and output checks.
 Its timings are not substituted for the release-mode CI decision table, recorded
 with the exact-head run in the PR. This assignment changes no production Rust,
 public API, requirement, manifest, publishing policy or small-body strategy.
-
-The follow-up [watchdog and benchmark isolation record](verification-v02-followup.md)
-moves this decision harness into tests/read_strategy_bench.rs and adds operation/
-join watchdogs around all whole-reader tests, without changing production reads.
