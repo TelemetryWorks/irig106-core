@@ -453,46 +453,91 @@ mod tests {
         pool.cancel().unwrap();
         assert_eq!(pool.stats().unwrap().used_bytes, fixed);
     }
+    fn bounded<T: Send + 'static>(operation: impl FnOnce() -> T + Send + 'static) -> T {
+        let worker = std::thread::spawn(operation);
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while !worker.is_finished() {
+            assert!(
+                Instant::now() < deadline,
+                "pool operation exceeded watchdog"
+            );
+            std::thread::yield_now();
+        }
+        worker.join().unwrap()
+    }
+    #[test]
+    fn readiness_after_wake_wins_over_expired_deadline() {
+        bounded(|| {
+            let pool = BlockPool::with_defaults().unwrap();
+            let owner = pool.try_begin(1).unwrap();
+            let deadline = Instant::now() + std::time::Duration::from_secs(1);
+            let p = pool.clone();
+            let worker = std::thread::spawn(move || p.begin_until(1, deadline));
+            let watchdog = Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                let mut state = pool.lock().unwrap();
+                if state.waiting == 1 {
+                    // Retain the mutex until expiry: even a timeout/spurious wake
+                    // cannot return the guard until readiness is already true.
+                    state.assembling = false;
+                    while Instant::now() <= deadline {
+                        std::thread::yield_now();
+                    }
+                    pool.shared.changed.notify_all();
+                    break;
+                }
+                assert!(Instant::now() < watchdog);
+                drop(state);
+                std::thread::yield_now();
+            }
+            drop(bounded(move || worker.join().unwrap().unwrap()));
+            drop(owner);
+        });
+    }
     #[test]
     fn no_returner_is_provable_only_without_outstanding_resources() {
-        let pool = BlockPool::with_defaults().unwrap();
-        // Exercise the wait boundary directly: public acquisition is ready in
-        // this state, so it never needs to wait. No owner can release anything.
-        let state = pool.lock().unwrap();
-        assert!(matches!(
-            pool.wait(state, Some(Instant::now())),
-            Err(PoolError::BudgetUnavailable)
-        ));
-        assert_eq!(pool.stats().unwrap().waiting, 0);
-        // An outstanding permit is a possible returner even on this thread.
-        let owner = pool.try_begin(1).unwrap();
-        assert!(matches!(pool.try_begin(1), Err(PoolError::WouldBlock)));
-        assert!(matches!(
-            pool.begin_until(1, Instant::now()),
-            Err(PoolError::DeadlineExceeded)
-        ));
-        drop(owner);
+        bounded(|| {
+            let pool = BlockPool::with_defaults().unwrap();
+            // Exercise the wait boundary directly: public acquisition is ready in
+            // this state, so it never needs to wait. No owner can release anything.
+            let state = pool.lock().unwrap();
+            assert!(matches!(
+                pool.wait(state, Some(Instant::now())),
+                Err(PoolError::BudgetUnavailable)
+            ));
+            assert_eq!(pool.stats().unwrap().waiting, 0);
+            // An outstanding permit is a possible returner even on this thread.
+            let owner = pool.try_begin(1).unwrap();
+            assert!(matches!(pool.try_begin(1), Err(PoolError::WouldBlock)));
+            assert!(matches!(
+                pool.begin_until(1, Instant::now()),
+                Err(PoolError::DeadlineExceeded)
+            ));
+            drop(owner);
+        });
     }
     #[test]
     fn deadlines_expire_without_cancelling_or_consuming_resources() {
-        use std::time::Duration;
-        let pool = BlockPool::new(BLOCK_BYTES + 4096).unwrap();
-        let mut owner = pool.try_begin(1).unwrap();
-        assert!(matches!(
-            pool.begin_until(1, Instant::now() + Duration::from_millis(1)),
-            Err(PoolError::DeadlineExceeded)
-        ));
-        let block = owner.try_next_block().unwrap();
-        drop(owner);
-        let mut next = pool.try_begin(1).unwrap();
-        assert!(matches!(
-            next.next_block_until(Instant::now() + Duration::from_millis(1)),
-            Err(PoolError::DeadlineExceeded)
-        ));
-        assert_eq!(pool.stats().unwrap().waiting, 0);
-        drop(block);
-        // Readiness is checked before the wait deadline; the failed attempt kept its slot.
-        drop(next.next_block_until(Instant::now()).unwrap());
+        bounded(|| {
+            use std::time::Duration;
+            let pool = BlockPool::new(BLOCK_BYTES + 4096).unwrap();
+            let mut owner = pool.try_begin(1).unwrap();
+            assert!(matches!(
+                pool.begin_until(1, Instant::now() + Duration::from_millis(1)),
+                Err(PoolError::DeadlineExceeded)
+            ));
+            let block = owner.try_next_block().unwrap();
+            drop(owner);
+            let mut next = pool.try_begin(1).unwrap();
+            assert!(matches!(
+                next.next_block_until(Instant::now() + Duration::from_millis(1)),
+                Err(PoolError::DeadlineExceeded)
+            ));
+            assert_eq!(pool.stats().unwrap().waiting, 0);
+            drop(block);
+            // Readiness is checked before the wait deadline; the failed attempt kept its slot.
+            drop(next.next_block_until(Instant::now()).unwrap());
+        });
     }
     #[test]
     fn spurious_notification_rechecks_predicate_and_cancellation() {
