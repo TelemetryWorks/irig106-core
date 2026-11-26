@@ -60,8 +60,10 @@ jobs:
       - name: Bounded warm-cache file read benchmark (informational)
         if: matrix.os == 'ubuntu-24.04'
         run: cargo test -p irig106-core --test whole --locked bounded_file_read_benchmark -- --ignored --exact --nocapture
-      - name: Small-body strategy comparison (owner decision pending)
+      - name: Small-body comparison (informational, 64 MiB per case)
         if: matrix.os == 'ubuntu-24.04'
+        env:
+          IRIG106_SMALL_BODY_BENCH_BYTES: "67108864"
         run: cargo test --release -p irig106-core --test read_strategy_bench --locked small_body_read_strategy_benchmark -- --ignored --exact --nocapture
 
   contract:
@@ -78,6 +80,7 @@ jobs:
           components: rustfmt, clippy
       - run: python3 scripts/test_workspace.py
       - run: python3 scripts/test_rss_probe.py
+      - run: python3 scripts/test_whole_resources.py
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Run public inspect example fixtures
@@ -138,3 +141,39 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@70f81531115945ba6eb6b941ec9d39d063438eb9 # v2.1.2
         with:
           arguments: --locked --all-features
+
+  whole-memory:
+    name: Whole memory (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+      - run: cargo build --release -p irig106-core --example whole_resources --locked
+      - run: python3 scripts/check_whole_resources.py target/release/examples/whole_resources${{ runner.os == 'Windows' && '.exe' || '' }}
+      - name: One-off memory controls (discard after evidence)
+        if: runner.os == 'Linux'
+        run: python3 scripts/control_whole_resources.py
+
+  target32:
+    name: Executed 32-bit Windows tests
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+          targets: i686-pc-windows-msvc
+      - run: cargo test --workspace --locked --target i686-pc-windows-msvc

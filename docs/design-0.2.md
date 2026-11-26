@@ -463,3 +463,12 @@ Abort and explicit drain are documented contracts only; their delivery APIs,
 coalescing and slice-7 resource/platform qualification remain outstanding.
 No inventory admission counters or geometric refill strategy are introduced.
 See [slice-6 evidence](verification-v02-s06.md).
+
+
+## Slice 7 qualification boundary
+
+[Resource/platform/performance evidence](verification-v02-s07.md) adds isolated
+whole-reader RSS/Windows commit gates, executed 32-bit limits and a larger existing
+informational benchmark. The capture RSS gate and approved read policy remain
+unchanged. Chunk/drain/coalescing and inventory admission counters remain outside
+this assignment with the owner; this qualification does not claim RC readiness.
