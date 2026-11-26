@@ -42,7 +42,7 @@ impl SecondaryIntegrity {
     }
 }
 
-/// Packet-data checksum contents are deliberately not validated in 0.1.
+/// Packet-data integrity evidence; mismatch never rejects a frame by default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DataChecksumState {
@@ -50,6 +50,24 @@ pub enum DataChecksumState {
     Absent,
     /// Space is checked, contents are not checked (including zero checksum bytes).
     NotChecked,
+    /// Stored and computed arithmetic sums agree; not payload authenticity.
+    #[non_exhaustive]
+    Verified {
+        /// Checksum width in bytes (1, 2 or 4).
+        width: u8,
+        /// Matching unsigned sum.
+        value: u32,
+    },
+    /// Complete frame delivered with differing stored and computed sums.
+    #[non_exhaustive]
+    Mismatch {
+        /// Checksum width in bytes (1, 2 or 4).
+        width: u8,
+        /// Stored little-endian unsigned value.
+        stored: u32,
+        /// Computed arithmetic sum modulo the selected width.
+        computed: u32,
+    },
 }
 
 /// Disjoint byte ranges relative to the packet start, not absolute file offsets.
@@ -67,7 +85,7 @@ pub struct PacketRanges {
     pub filler: Range<u32>,
     /// Final 0/1/2/4 checksum bytes, selected by flags bits 1–0.
     pub checksum: Range<u32>,
-    /// Explicitly absent or unvalidated contents.
+    /// Checksum evidence; from_header alone cannot verify contents.
     pub data_checksum: DataChecksumState,
 }
 impl PacketRanges {
@@ -107,5 +125,93 @@ impl PacketRanges {
                 DataChecksumState::NotChecked
             },
         })
+    }
+}
+
+// Fixed carry supports arbitrary arriving-span boundaries, without copies of
+// payloads or a second traversal of an assembled packet.
+pub(crate) struct DataChecksum {
+    width: usize,
+    sum: u32,
+    pending: [u8; 4],
+    used: usize,
+}
+impl DataChecksum {
+    pub(crate) fn new(width: usize) -> Self {
+        Self {
+            width,
+            sum: 0,
+            pending: [0; 4],
+            used: 0,
+        }
+    }
+    pub(crate) fn update(&mut self, mut bytes: &[u8]) {
+        if self.used > 0 {
+            let n = (self.width - self.used).min(bytes.len());
+            self.pending[self.used..self.used + n].copy_from_slice(&bytes[..n]);
+            self.used += n;
+            bytes = &bytes[n..];
+            if self.used < self.width {
+                return;
+            }
+            self.sum = self.sum.wrapping_add(u32::from_le_bytes(self.pending));
+            self.pending = [0; 4];
+            self.used = 0;
+        }
+        self.sum = match self.width {
+            1 => bytes
+                .iter()
+                .fold(self.sum, |s, &b| s.wrapping_add(u32::from(b))),
+            2 => bytes.chunks_exact(2).fold(self.sum, |s, w| {
+                s.wrapping_add(u32::from(u16::from_le_bytes([w[0], w[1]])))
+            }),
+            4 => bytes.chunks_exact(4).fold(self.sum, |s, w| {
+                s.wrapping_add(u32::from_le_bytes(w.try_into().unwrap()))
+            }),
+            _ => unreachable!(),
+        };
+        let remainder = bytes.len() % self.width;
+        self.pending[..remainder].copy_from_slice(&bytes[bytes.len() - remainder..]);
+        self.used = remainder;
+    }
+    pub(crate) fn finish(self, stored: &[u8]) -> DataChecksumState {
+        // Header and checksum alignment guarantee complete words at packet end.
+        debug_assert_eq!(self.used, 0);
+        let mut raw = [0; 4];
+        raw[..self.width].copy_from_slice(stored);
+        let stored = u32::from_le_bytes(raw);
+        let computed = self.sum & (u32::MAX >> (32 - self.width * 8));
+        if stored == computed {
+            DataChecksumState::Verified {
+                width: self.width as u8,
+                value: computed,
+            }
+        } else {
+            DataChecksumState::Mismatch {
+                width: self.width as u8,
+                stored,
+                computed,
+            }
+        }
+    }
+}
+#[cfg(test)]
+mod data_checksum_tests {
+    use super::*;
+    #[test]
+    fn carry_is_independent_of_arrival_boundaries() {
+        // Independent literal sums: bytes 1..=12 => 78, words => 2A24,
+        // longwords 04030201 + 08070605 + 0C0B0A09 => 1815120F.
+        for (width, sum) in [(1, 78u32), (2, 0x2A24), (4, 0x1815120F)] {
+            for quantum in 1..=13 {
+                let mut c = DataChecksum::new(width);
+                for bytes in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].chunks(quantum) {
+                    c.update(bytes);
+                }
+                assert!(
+                    matches!(c.finish(&sum.to_le_bytes()[..width]), DataChecksumState::Verified{value,..} if value==sum)
+                );
+            }
+        }
     }
 }

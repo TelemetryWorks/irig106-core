@@ -37,12 +37,14 @@ impl<R: Read> Read for Counted<R> {
 #[test]
 #[ignore = "owner decision evidence only; release-mode matrix runs explicitly in CI"]
 fn small_body_read_strategy_benchmark() {
-    watchdog(
-        Duration::from_secs(120),
-        small_body_read_strategy_benchmark_case,
-    );
+    watchdog(Duration::from_secs(120), || read_benchmark_case(false));
 }
-fn small_body_read_strategy_benchmark_case() {
+#[test]
+#[ignore = "checksum cost evidence only; release-mode CI, no timing gate"]
+fn data_checksum_cost_benchmark() {
+    watchdog(Duration::from_secs(120), || read_benchmark_case(true));
+}
+fn read_benchmark_case(checksums: bool) {
     use std::{
         fs::{File, OpenOptions},
         io::{BufWriter, Write},
@@ -88,7 +90,6 @@ fn small_body_read_strategy_benchmark_case() {
         pool: &BlockPool,
         buf: &mut PacketBuf,
         packets: usize,
-        p: usize,
         policy: WholePolicy,
     ) -> Sample {
         let mut reader = WholePacketReader::stream(input, policy, pool.clone()).unwrap();
@@ -100,14 +101,15 @@ fn small_body_read_strategy_benchmark_case() {
         while let Some(event) = reader.next_packet_into(buf, deadline).unwrap() {
             assert!(matches!(event, WholeEvent::Packet));
             let bytes = std::hint::black_box(buf.contiguous().unwrap());
-            digest = digest.wrapping_add(usize::from(bytes[0]) + usize::from(bytes[p - 1]));
+            digest = digest.wrapping_add(usize::from(bytes[0]));
+            std::hint::black_box(buf.info().unwrap().ranges.data_checksum);
             seen += 1;
         }
         let seconds = start.elapsed().as_secs_f64();
         let after = kernel_reads();
         let kernel = before.zip(after).map(|(a, b)| b - a - 1);
         assert_eq!(seen, packets);
-        assert_eq!(digest, packets * (0x25 + 0x5a));
+        assert_eq!(digest, packets * 0x25);
         let calls = count(reader.into_inner());
         #[cfg(target_os = "linux")]
         assert_eq!(
@@ -126,16 +128,29 @@ fn small_body_read_strategy_benchmark_case() {
         .map(|v| v.parse::<usize>().unwrap())
         .unwrap_or(16 * 1024 * 1024);
     assert!((524_288..=32 * 1024 * 1024).contains(&target));
+    if !checksums {
+        println!(
+            "small_body benchmark: actual adaptive hybrid (64 KiB, cutoff 4 KiB) versus direct baseline (24-byte header buffer, cutoff 0), median of 3, alternating order; generation/construction/first block initialization excluded; warm cache; EOF read included"
+        );
+        println!(
+            "small_body,size,width_bytes,mode,packets,bytes,source_reads,kernel_read_syscalls,seconds,packets_per_s,MB_per_s"
+        );
+    }
+    let label = if checksums {
+        "data_checksum"
+    } else {
+        "small_body"
+    };
     println!(
-        "small_body benchmark: actual adaptive hybrid (64 KiB, cutoff 4 KiB) versus direct baseline (24-byte header buffer, cutoff 0), median of 3, alternating order; generation/construction/first block initialization excluded; warm cache; EOF read included"
+        "{label}: median of 3 alternating modes; checksum comparison uses same actual hybrid and valid fixtures, generation/construction/warm-up excluded; warm-cache informational throughput"
     );
-    println!(
-        "small_body,size,mode,packets,bytes,source_reads,kernel_read_syscalls,seconds,packets_per_s,MB_per_s"
-    );
-    for (case, p) in [28usize, 400, 4096, 65_536, 524_288]
-        .into_iter()
-        .enumerate()
-    {
+    let widths: &[usize] = if checksums { &[1, 2, 4] } else { &[0] };
+    for (width, case, p) in widths.iter().flat_map(|&width| {
+        [28usize, 400, 4096, 65_536, 524_288]
+            .into_iter()
+            .enumerate()
+            .map(move |(case, p)| (width, case, p))
+    }) {
         let packets = target / p;
         let total = packets * p;
         let stamp = SystemTime::now()
@@ -155,8 +170,22 @@ fn small_body_read_strategy_benchmark_case() {
                 .open(&path.0)
                 .unwrap(),
         );
-        let mut bytes = frame(p as u32, 0, 9, 0);
-        bytes[8..12].copy_from_slice(&((p - 24) as u32).to_le_bytes());
+        let flag = match width {
+            0 => 0,
+            1 => 1,
+            2 => 2,
+            _ => 3,
+        };
+        let mut bytes = frame(p as u32, 0, 9, flag);
+        bytes[8..12].copy_from_slice(&((p - 24 - width) as u32).to_le_bytes());
+        if width > 0 {
+            let sum: u64 = bytes[24..p - width]
+                .iter()
+                .enumerate()
+                .map(|(i, &b)| u64::from(b) << (8 * (i % width)))
+                .sum();
+            bytes[p - width..].copy_from_slice(&(sum as u32).to_le_bytes()[..width]);
+        }
         let checksum = bytes[..22].chunks_exact(2).fold(0u16, |sum, w| {
             sum.wrapping_add(u16::from_le_bytes([w[0], w[1]]))
         });
@@ -179,7 +208,9 @@ fn small_body_read_strategy_benchmark_case() {
                     input: File::open(&path.0).unwrap(),
                     calls: 0,
                 };
-                let policy = if mode == 0 {
+                let policy = if checksums {
+                    WholePolicy::new().with_data_checksum_verification(mode == 1)
+                } else if mode == 0 {
                     WholePolicy::new()
                         .with_read_ahead_bytes(24)
                         .with_small_body_cutoff(0)
@@ -192,7 +223,6 @@ fn small_body_read_strategy_benchmark_case() {
                     &pool,
                     &mut buf,
                     packets,
-                    p,
                     policy,
                 );
                 samples[mode].push(sample);
@@ -201,7 +231,13 @@ fn small_body_read_strategy_benchmark_case() {
         for (index, mut group) in samples.into_iter().enumerate() {
             group.sort_by(|a, b| a.seconds.total_cmp(&b.seconds));
             let median = &group[1];
-            let mode = if index == 0 {
+            let mode = if checksums {
+                if index == 0 {
+                    "checksum_off"
+                } else {
+                    "checksum_on"
+                }
+            } else if index == 0 {
                 "direct"
             } else {
                 "adaptive_hybrid_64KiB_cutoff4KiB"
@@ -210,7 +246,7 @@ fn small_body_read_strategy_benchmark_case() {
                 .kernel
                 .map_or_else(|| "unsupported".to_owned(), |n| n.to_string());
             println!(
-                "small_body,{p},{mode},{packets},{total},{},{kernel},{:.6},{:.1},{:.1}",
+                "{label},{p},{width},{mode},{packets},{total},{},{kernel},{:.6},{:.1},{:.1}",
                 median.calls,
                 median.seconds,
                 packets as f64 / median.seconds,

@@ -37,8 +37,8 @@ mod whole;
 pub use error::{Error, ErrorKind, Recovery, Tail};
 pub use header::{Header, HeaderError, PRIMARY_HEADER_LEN, primary_checksum};
 pub use inspection::{
-    AdmissionCounts, ChannelStats, Counts, Inspection, InspectionError, InspectionLimits, Presence,
-    PresenceFacts, ScanStatus,
+    AdmissionCounts, ChannelStats, Counts, DataChecksumCounts, Inspection, InspectionError,
+    InspectionLimits, Presence, PresenceFacts, ScanStatus,
 };
 pub use integrity::{DataChecksumState, PacketRanges, SecondaryIntegrity};
 pub use irig106_types::Rtc;

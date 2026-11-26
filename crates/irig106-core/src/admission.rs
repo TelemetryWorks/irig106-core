@@ -27,6 +27,7 @@ pub struct WholePolicy {
     pub(crate) recovery: Option<u64>,
     pub(crate) read_ahead: usize,
     pub(crate) small_body: usize,
+    pub(crate) verify_data_checksum: bool,
 }
 impl Default for WholePolicy {
     fn default() -> Self {
@@ -44,6 +45,7 @@ impl WholePolicy {
             recovery: None,
             read_ahead: DEFAULT_READ_AHEAD_BYTES,
             small_body: DEFAULT_SMALL_BODY_CUTOFF,
+            verify_data_checksum: true,
         }
     }
     /// Override absolute total-frame H; soft allowances never override it.
@@ -82,6 +84,12 @@ impl WholePolicy {
     /// already fully buffered bodies are still copied.
     pub const fn with_small_body_cutoff(mut self, bytes: usize) -> Self {
         self.small_body = bytes;
+        self
+    }
+    /// Verify packet-data sums incrementally (default true). Disable explicitly
+    /// for speed; declared checksums then remain NotChecked. Capture is unchanged.
+    pub const fn with_data_checksum_verification(mut self, enabled: bool) -> Self {
+        self.verify_data_checksum = enabled;
         self
     }
     /// Configured fixed read-ahead capacity.

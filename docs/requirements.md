@@ -137,10 +137,11 @@ aggregate CLI requirement receives verification credit.
 | L2-END-004 | L1-CORE-004 | No complete valid packet yields NoCompletePacket (CLI input3); after one, cut-final headers/packets and EOF padding remain tail evidence/findings. |
 | L2-ERR-004 | L1-CORE-004 | Propagate real I/O failures; reject impossible checksum-qualified lengths; preserve content-vs-structure distinction and prior events. |
 | L2-SEC-005 | L1-CORE-005 | Bit 7 alone selects twelve raw secondary bytes; expose reserved fields and both checksum readings without decoding time or discarding primary RTC. |
-| L2-CHK-005 | L1-CORE-005 | Check trailer checksum width/ranges; label packet-data checksum contents NotChecked in 0.1. |
+| L2-CHK-005 | L1-CORE-005 | In 0.1/capture, check trailer checksum width/ranges; label packet-data checksum contents NotChecked in 0.1. |
 | L2-EDN-005 | L1-CORE-005 | Baseline is 106-24R1; preserve unknown codes and never infer recording edition from data-type version. |
 | L2-INV-006 | L1-CORE-006 | Bound channel/row state; count packets, DATA/packet bytes, lengths and raw data types with checked arithmetic and explicit limit failures. |
 | L2-SEQ-006 | L1-CORE-006 | Track sequence continuity per channel, including wrap; expose gaps as observations, not proof of packet loss. |
+| L2-CHK-012 | L1-CORE-005, L2-HOT-008 | Whole-mode checksum verification defaults ON, with explicit opt-out. Incrementally sum each received body+filler span at flags-selected width modulo 8/16/32 bits, excluding both headers/stored sum, without payload copies or an assembled-frame pass. Report Absent/NotChecked/Verified/Mismatch in PacketInfo; mismatch never rejects by default. Preserve capture behavior, coalesced evidence and atomic checked inspection outcome counts. |
 | L2-INV-009 | L1-CORE-006 | Owner 2026-11-26 decision 3A: aggregate accepted whole-packet admission evidence with fixed checked counters for coverage, over-soft packets, each authorization kind and reported legacy-setup use. Capture events do not fabricate admission. Limit/overflow failures commit no inventory state; summaries report coverage and retained scope. |
 | L2-PRES-006 | L1-CORE-006 | Observe setup/index/event packet presence without validating contents; absence after incomplete scans is inconclusive. |
 | L2-PKG-007 | L1-CORE-007 | Use a virtual workspace at crates/irig106-core, edition 2024/MSRV 1.85, std-first, types 0.1 as sole ecosystem dependency. |
@@ -176,10 +177,11 @@ Coverage is clause-scoped in the slice evidence; planned probes are not passes.
 | L3-END-004 → L2-END-004 | Empty/no-sync/lone truncated input; complete packet then every header/body cut and zero/FF padding; preserve preceding results. |
 | L3-ERR-004 → L2-ERR-004 | Invalid structure fatal; short/invalid semantic body still delivered; terminal behavior and I/O errors during recovery retain evidence. |
 | L3-SEC-005 → L2-SEC-005 | Bits 7/2 independence; twelve-byte truncations; byte-only/word-only/both/neither checksum vectors; primary RTC retained. |
-| L3-CHK-005 → L2-CHK-005 | Every trailer width and insufficient space; checksum contents remain explicitly NotChecked, never reported valid. |
+| L3-CHK-005 → L2-CHK-005 | 0.1/capture: every trailer width and insufficient space; checksum contents remain explicitly NotChecked, never reported valid. |
 | L3-EDN-005 → L2-EDN-005 | Unknown type/version preserved; distinguish setup-record and data-type version mappings; no implicit edition. |
 | L3-INV-006 → L2-INV-006 | Independent totals; interleaved types; row/channel cap edges and arithmetic overflow; no growing packet/diagnostic vectors. |
 | L3-SEQ-006 → L2-SEQ-006 | 255→0, duplicate, discontinuity, interleaved channels and multiple types on one channel. |
+| L3-CHK-012 → L2-CHK-012 | Independent literal/weighted-byte oracles at all widths; odd DATA/filler, headers excluded, corruption evidence, multi-block boundaries, short/Interrupted reads, carry splits, no verified truncation, on/off/capture coverage and inspection overflow atomicity. Warmed allocator oracle includes all widths; unchanged RSS gates; bounded CI release benchmark reports on/off throughput without a timing gate. |
 | L3-INV-009 → L2-INV-009 | Independently packed within-soft/next-header/exact-EOF/stream-opt-in/legacy fixtures assert each incremental count and overlapping facts; capture has zero coverage, limit/overflow failures are atomic, and output includes scoped evidence. Every scalar accepts exact u64::MAX then rejects overflow without changing counts/rows/sequence/recovery; warm allocation and memory gates remain. |
 | L3-PRES-006 → L2-PRES-006 | Setup/index/event observations; absent complete vs incomplete scan; no semantic validity claim. |
 | L3-PKG-007 → L2-PKG-007 | Metadata, registry-only dependency/default-feature boundary and package file checks; CI builds archived source. Header integration tests use the shared Rtc directly. |
@@ -223,8 +225,9 @@ merge. Tests first; record compile failures separately from runtime failures.
 9. One org-standard Trusted Publishing adoption PR with passing unsigned PR dry
    run. No publication/tag or environment-policy change is authorized here.
 
-Tracked post-0.1: no_std/alloc support; streaming packet-data checksum validation
-for all supported widths. SIMD, async, mmap, parallel scanning and throughput
+Tracked post-0.1: no_std/alloc support; whole-mode packet-data checksum validation
+is implemented for 0.2 at all supported widths (L2-CHK-012). SIMD, async, mmap,
+parallel scanning and throughput
 claims need separate measured justification. Time remains paused; on resume it
 adopts published core and removes its duplicate reader. Core does not depend on
 TMATS 0.1; its parallel work must not block structural traversal.
