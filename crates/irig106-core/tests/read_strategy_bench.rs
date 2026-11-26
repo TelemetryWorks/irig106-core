@@ -127,7 +127,7 @@ fn small_body_read_strategy_benchmark_case() {
         .unwrap_or(16 * 1024 * 1024);
     assert!((524_288..=32 * 1024 * 1024).contains(&target));
     println!(
-        "small_body benchmark: actual hybrid (64 KiB, cutoff 4 KiB) versus direct baseline (24-byte header buffer, cutoff 0), median of 3, alternating order; generation/construction/first block initialization excluded; warm cache; EOF read included"
+        "small_body benchmark: actual adaptive hybrid (64 KiB, cutoff 4 KiB) versus direct baseline (24-byte header buffer, cutoff 0), median of 3, alternating order; generation/construction/first block initialization excluded; warm cache; EOF read included"
     );
     println!(
         "small_body,size,mode,packets,bytes,source_reads,kernel_read_syscalls,seconds,packets_per_s,MB_per_s"
@@ -204,7 +204,7 @@ fn small_body_read_strategy_benchmark_case() {
             let mode = if index == 0 {
                 "direct"
             } else {
-                "hybrid_64KiB_cutoff4KiB"
+                "adaptive_hybrid_64KiB_cutoff4KiB"
             };
             let kernel = median
                 .kernel

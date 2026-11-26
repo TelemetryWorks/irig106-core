@@ -208,6 +208,21 @@ measured winning frame size, while 64 KiB lost in both reference runs. A 4 KiB
 body cutoff covers those 4 KiB frames and avoids extrapolating to unmeasured
 intermediate sizes. It remains caller-configurable; it is not a claimed optimum.
 
+Adaptive frame-boundary requests keep the **capacity** at 64 KiB. A cold reader
+starts with full-capacity header refills. After a completed frame whose body is
+>= cutoff, header refills request **24 bytes (header-only)**, within the allowed
+min(capacity, 24 + cutoff) bound. Pending bytes are consumed first; this also bounds a refill needed
+for a straddling/short header. After a smaller body, header refills again allow
+full capacity. Small-body and recovery refills always retain full capacity.
+The header-only choice needs no cutoff addition/overflow. Only requested read size
+changes; the approved copy-once-per-body rule and fixed allocation are unchanged.
+At an empty boundary this avoids prefetched body bytes entirely after the first
+cold large frame; a straddling header refill can prefetch at most 23 body bytes.
+The previous full request copied about 64 KiB from every large frame.
+Mixed streams may still encounter a fully prefetched large body after small
+frames; the existing copy rule handles it unchanged. This is an implementation
+detail of the approved hybrid, not a new owner policy.
+
 For larger bodies, drain the pending prefix, then read directly into remaining
 frame/block space. The prefix takes the allowed second copy; only the unbuffered
 remainder has one kernel-to-user copy. Decide once for the **entire body**, so a
@@ -362,7 +377,7 @@ No settings, overcommit policy or process limits are changed by this design.
 | Control | Oracle / falsifying regression |
 | --- | --- |
 | L3-BLOCK-008 | Maintainer-derived, coordinator-confirmed default block size is 524,288 bytes including all headers/trailer. Independent frames at small P and exactly P = 524,288, with/without secondary headers and each trailer width, occupy one block and expose their exact full bytes as one contiguous borrowed slice. An admitted P = 524,292 uses two blocks; maximum setup uses 256. No automatic coalescing. |
-| L3-HOT-008 | Instrument Read destinations/call sizes for the single budgeted read-ahead buffer, fully buffered bodies and strict cutoff boundaries, and direct large remainders including a tiny final block. Verify exact bytes/offsets with pending headers, recovery, short/Interrupted reads and seek probes; no large-body refill caused by a short read/final fragment. Constructor buffer accounting/failure and prefetch-time SourceChanged are typed. After pool/descriptor warm-up, allocation counting over mixed ordinary sizes is zero (oracles outside measurement). Four-worker bursts retain 16 live-to-idle blocks and allocate zero after warm-up; large-return/pressure trim remains separate. Borrow lifetimes prevent reuse while views live. Cold EOF has at most one budgeted provisional block plus fixed read-ahead, never a P-sized request. |
+| L3-HOT-008 | Instrument Read destinations/call sizes for the single budgeted read-ahead buffer, fully buffered bodies and strict cutoff boundaries, and direct large remainders including a tiny final block. Verify exact bytes/offsets with pending headers, recovery, short/Interrupted reads and seek probes; no large-body refill caused by a short read/final fragment. Constructor buffer accounting/failure and prefetch-time SourceChanged are typed. After pool/descriptor warm-up, allocation counting over mixed ordinary sizes is zero (oracles outside measurement). Four-worker bursts retain 16 live-to-idle blocks and allocate zero after warm-up; large-return/pressure trim remains separate. Borrow lifetimes prevent reuse while views live. Cold EOF has at most one budgeted provisional block plus fixed read-ahead, never a P-sized request. Assert capped header requests after large bodies and full requests after small bodies, including straddling/short headers; recovery and small-body refills stay full. Exercise capacity/cutoff/short-read/recovery combinations byte- and offset-exact. Both whole constructors reject 23-byte capacity with typed InvalidRequest and unchanged pool accounting, accept 24; directly test the private factory minimum. |
 | L3-DEFAULT-008 | Whole-packet new()/Default H = 134,217,728, B = 268,435,456 and shared idle N = 8 (4 MiB). Construction allocates/pre-touches zero payload blocks; demand-only warm-up does not fill to N. After large-return/pressure trim, at most eight idle blocks remain across readers/slots; ordinary returns can retain a larger warmed working set within B, and pressure may retain fewer. Independent H/B overrides preserve the other setting; defaults do not allocate H/B or alter 0.1 ReaderLimits. Feasibility still includes workspace/pool. |
 | L3-EOF-008 | Stable exact EOF admitted with precisely Unconfirmed(ExactEof), whole bytes and no next-header/stream-opt-in requirement; one byte short takes truncation-only path; identity replacement or size mutation before admission/after body returns SourceChanged with no packet. Missing stability evidence cannot authorize ExactEof. |
 | L3-LEGACY-008 | Default off: channel0/type01 selects setup S, nonzero/type01 retains ordinary S. Explicit opt-in selects setup S on nonzero/type01 and records LegacySetupAnyChannel evidence. Other types, arbitrary Data Type Versions and guessed editions never enable it. H/B overrides still apply. |
