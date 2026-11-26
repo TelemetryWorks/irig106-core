@@ -159,8 +159,11 @@ zero and occupies exactly one block; its valid frame is one contiguous slice.
 Headers, secondary bytes, DATA, filler and checksum all fit that same block.
 Larger packets use multiple blocks; a maximum 128 MiB setup occupies 256 blocks.
 There is no automatic contiguous-only representation or multi-block coalescing.
-This block size is the maintainer's derivation of the owner's one-piece requirement,
-confirmed by the owner during #17 review.
+The **512 KiB size is the maintainer's derivation**, confirmed by the
+**coordinator**: it is the smallest block that fits every ordinary standard-sized
+packet, including headers/trailer. This concrete size is a design choice, not
+itself an owner requirement. L2-HOT-008 records the owner's one-piece, direct-read,
+no-steady-state-allocation and borrowed-payload direction.
 
 **Pool warm-up is lazy:** construction allocates or pre-touches **zero payload
 blocks**. The default idle retention baseline is **N = 8 blocks**, or
@@ -332,7 +335,7 @@ No settings, overcommit policy or process limits are changed by this design.
 
 | Control | Oracle / falsifying regression |
 | --- | --- |
-| L3-BLOCK-008 | Default block size is 524,288 bytes including all headers/trailer. Independent frames at small P and exactly P = 524,288, with/without secondary headers and each trailer width, occupy one block and expose their exact full bytes as one contiguous borrowed slice. An admitted P = 524,292 uses two blocks; maximum setup uses 256. No automatic coalescing. |
+| L3-BLOCK-008 | Maintainer-derived, coordinator-confirmed default block size is 524,288 bytes including all headers/trailer. Independent frames at small P and exactly P = 524,288, with/without secondary headers and each trailer width, occupy one block and expose their exact full bytes as one contiguous borrowed slice. An admitted P = 524,292 uses two blocks; maximum setup uses 256. No automatic coalescing. |
 | L3-HOT-008 | Instrument Read destinations to prove every body read targets the final pool block at its frame offset, never scratch/BufReader; short/Interrupted reads preserve this and never overread the frame. After pool/descriptor warm-up, allocation counting over many mixed ordinary packet sizes is zero (oracle storage preallocated). Borrow/lifetime checks reject owner reuse while views live. Cold EOF has at most one budgeted provisional block and no speculative P-sized request. |
 | L3-DEFAULT-008 | Whole-packet new()/Default H = 134,217,728, B = 268,435,456 and shared idle N = 8 (4 MiB). Construction allocates/pre-touches zero payload blocks; demand-only warm-up does not fill to N. After returns/trim, at most eight idle blocks remain across readers/slots; pressure may retain fewer. Independent H/B overrides preserve the other setting; defaults do not allocate H/B or alter 0.1 ReaderLimits. Feasibility still includes workspace/pool. |
 | L3-EOF-008 | Stable exact EOF admitted with precisely Unconfirmed(ExactEof), whole bytes and no next-header/stream-opt-in requirement; one byte short takes truncation-only path; identity replacement or size mutation before admission/after body returns SourceChanged with no packet. Missing stability evidence cannot authorize ExactEof. |
