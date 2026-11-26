@@ -472,3 +472,14 @@ whole-reader RSS/Windows commit gates, executed 32-bit limits and a larger exist
 informational benchmark. The capture RSS gate and approved read policy remain
 unchanged. Chunk/drain/coalescing and inventory admission counters remain outside
 this assignment with the owner; this qualification does not claim RC readiness.
+
+
+## Owner decisions 2026-11-26: remaining 0.2 features
+
+Decision 3A approves aggregate admission-evidence inventory counters, implemented
+with explicit coverage and transactional checked arithmetic; see
+[verification](verification-v02-admission-counts.md). Decision 4B confirms explicit
+budgeted coalescing, drain and chunk delivery are all required for 0.2, opt-in and
+reported, with cancellation/deadlines and no credit cycles. Implement each in its
+own reviewed PR in that order after counters. Their implementation remains
+outstanding here; approval is no longer pending. No release is authorized.

@@ -1,5 +1,8 @@
 //! Bounded header inventory. No payload bytes, packet history or diagnostics.
-use crate::{Event, Header, PacketInfo, SequenceObservation};
+use crate::{
+    AdmissionEvidence, Authorization, Event, Header, PacketInfo, SequenceObservation,
+    UnconfirmedReason,
+};
 use std::{collections::BTreeMap, fmt};
 
 /// Explicit entry budgets; zero permits no entries. No preallocation occurs.
@@ -56,6 +59,71 @@ impl Counts {
                 .checked_add(u64::from(h.packet_length()))
                 .ok_or(InspectionError::CountOverflow)?,
         })
+    }
+}
+/// Admission evidence from successfully accumulated complete whole packets only.
+/// Capture events carry no admission evidence; compare evaluated_packets with
+/// totals().packets for coverage. Over-soft and legacy counters overlap the
+/// authorization partition; zero never proves absent evidence in omitted input.
+/// ```compile_fail,E0639
+/// use irig106_core::AdmissionCounts;
+/// fn closed(value: AdmissionCounts) { let _ = AdmissionCounts { ..value }; }
+/// ```
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AdmissionCounts {
+    /// Complete packets whose admission evidence was observed.
+    pub evaluated_packets: u64,
+    /// Packet Length exceeded its applicable soft threshold.
+    pub over_soft: u64,
+    /// Authorization was WithinSoft.
+    pub within_soft: u64,
+    /// Authorization was NextHeader, not proof of the following body's validity.
+    pub next_header: u64,
+    /// Authorization was Unconfirmed(ExactEof), not confirmation of content.
+    pub unconfirmed_exact_eof: u64,
+    /// Caller explicitly authorized oversoft stream input.
+    pub stream_opt_in: u64,
+    /// The explicit legacy allowance was used, not merely enabled.
+    pub legacy_setup_any_channel: u64,
+}
+impl AdmissionCounts {
+    fn after(mut self, evidence: Option<&AdmissionEvidence>) -> Result<Self, InspectionError> {
+        let Some(e) = evidence else {
+            return Ok(self);
+        };
+        for (counter, increment) in [
+            (&mut self.evaluated_packets, true),
+            (&mut self.over_soft, e.over_soft),
+            (
+                &mut self.within_soft,
+                matches!(e.authorization, Authorization::WithinSoft),
+            ),
+            (
+                &mut self.next_header,
+                matches!(e.authorization, Authorization::NextHeader { .. }),
+            ),
+            (
+                &mut self.unconfirmed_exact_eof,
+                matches!(
+                    e.authorization,
+                    Authorization::Unconfirmed(UnconfirmedReason::ExactEof)
+                ),
+            ),
+            (
+                &mut self.stream_opt_in,
+                matches!(e.authorization, Authorization::StreamOptIn),
+            ),
+            (
+                &mut self.legacy_setup_any_channel,
+                e.legacy_setup_any_channel,
+            ),
+        ] {
+            *counter = counter
+                .checked_add(u64::from(increment))
+                .ok_or(InspectionError::CountOverflow)?;
+        }
+        Ok(self)
     }
 }
 /// One (channel, raw data-type) row; exists only after a successful observation.
@@ -159,6 +227,7 @@ struct ChannelSequence {
 pub struct Inspection {
     limits: InspectionLimits,
     totals: Counts,
+    admission: AdmissionCounts,
     channels: BTreeMap<u16, ChannelSequence>,
     skipped_bytes: u64,
     rows: BTreeMap<(u16, u8), ChannelStats>,
@@ -173,6 +242,7 @@ impl Inspection {
         Self {
             limits,
             totals: Counts::default(),
+            admission: AdmissionCounts::default(),
             channels: BTreeMap::new(),
             skipped_bytes: 0,
             rows: BTreeMap::new(),
@@ -197,7 +267,7 @@ impl Inspection {
         } else {
             match event {
                 Event::Packet(p) => self
-                    .record(&p.header, p.offset, p.recovered_bytes)
+                    .record(&p.header, p.offset, p.recovered_bytes, None)
                     .map(Some),
                 Event::Tail { .. } => {
                     self.mark_incomplete();
@@ -222,7 +292,12 @@ impl Inspection {
         let result = if self.status != ScanStatus::InProgress {
             Err(InspectionError::Stopped)
         } else {
-            self.record(&packet.header, packet.offset, packet.recovered_bytes)
+            self.record(
+                &packet.header,
+                packet.offset,
+                packet.recovered_bytes,
+                Some(&packet.admission),
+            )
         };
         if result.is_err() {
             self.mark_incomplete();
@@ -234,6 +309,7 @@ impl Inspection {
         h: &Header,
         offset: u64,
         recovered_bytes: u64,
+        evidence: Option<&AdmissionEvidence>,
     ) -> Result<SequenceObservation, InspectionError> {
         let key = (h.channel(), h.data_type());
         if !self.channels.contains_key(&key.0) && self.channels.len() >= self.limits.max_channels {
@@ -247,6 +323,7 @@ impl Inspection {
             });
         }
         // Compute every fallible value before changing any inventory state.
+        let admission = self.admission.after(evidence)?;
         let skipped_bytes = self
             .skipped_bytes
             .checked_add(recovered_bytes)
@@ -280,6 +357,7 @@ impl Inspection {
         self.skipped_bytes = skipped_bytes;
         self.rows.insert(key, row);
         self.totals = totals;
+        self.admission = admission;
         self.types[key.1 as usize] = type_counts;
         self.seen[0] |= key == (0, 1);
         self.seen[1] |= key.1 == 3;
@@ -308,6 +386,11 @@ impl Inspection {
     /// Totals over successful complete-packet observations only.
     pub fn totals(&self) -> Counts {
         self.totals
+    }
+    /// Admission evidence over accepted whole metadata; capture events do not
+    /// fabricate authorization. Retained on tails/errors; read status for scope.
+    pub fn admission_counts(&self) -> AdmissionCounts {
+        self.admission
     }
     /// Number of retained distinct channels.
     pub fn channel_count(&self) -> usize {
@@ -436,5 +519,84 @@ mod tests {
         );
         assert_eq!(a.skipped_bytes, u64::MAX);
         assert_eq!(a.status(), ScanStatus::Incomplete);
+    }
+    #[test]
+    fn admission_overflow_is_atomic_for_every_field_and_other_counts() {
+        use crate::{EditionPolicy, PacketRanges};
+        let bytes = [
+            0x25, 0xeb, 0, 0, 28, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0x45, 0xf4, 1,
+            2, 3, 4,
+        ];
+        for field in 0..8 {
+            let header = Header::parse(&bytes).unwrap();
+            // Seed arithmetic boundaries directly; supplied evidence is counted,
+            // never recomputed from header type/version by the inventory.
+            let info = PacketInfo {
+                ranges: PacketRanges::from_header(&header).unwrap(),
+                header,
+                offset: 0,
+                recovered_bytes: 1,
+                secondary_integrity: None,
+                admission: AdmissionEvidence {
+                    edition: EditionPolicy::Irig106_24R1,
+                    soft_limit: 28,
+                    over_soft: true,
+                    legacy_setup_any_channel: true,
+                    authorization: match field {
+                        3 => Authorization::NextHeader { offset: 28 },
+                        4 => Authorization::Unconfirmed(UnconfirmedReason::ExactEof),
+                        5 => Authorization::StreamOptIn,
+                        _ => Authorization::WithinSoft,
+                    },
+                },
+            };
+            let mut a = Inspection::new(InspectionLimits::new(1, 1));
+            if field < 7 {
+                let counters = [
+                    &mut a.admission.evaluated_packets,
+                    &mut a.admission.over_soft,
+                    &mut a.admission.within_soft,
+                    &mut a.admission.next_header,
+                    &mut a.admission.unconfirmed_exact_eof,
+                    &mut a.admission.stream_opt_in,
+                    &mut a.admission.legacy_setup_any_channel,
+                ];
+                *counters[field] = u64::MAX - 1;
+                a.observe_packet_info(&info).unwrap(); // Exact MAX still succeeds.
+            } else {
+                a.totals.packets = u64::MAX;
+            }
+            let before = (
+                a.totals,
+                a.admission,
+                a.types,
+                a.rows.clone(),
+                a.channels.clone(),
+                a.skipped_bytes,
+                a.seen,
+                a.saw_recovery,
+            );
+            assert_eq!(
+                a.observe_packet_info(&info),
+                Err(InspectionError::CountOverflow)
+            );
+            assert_eq!(
+                (
+                    a.totals,
+                    a.admission,
+                    a.types,
+                    a.rows.clone(),
+                    a.channels.clone(),
+                    a.skipped_bytes,
+                    a.seen,
+                    a.saw_recovery
+                ),
+                before
+            );
+            assert_eq!(a.status(), ScanStatus::Incomplete);
+            a.finish();
+            assert_eq!(a.admission_counts(), before.1);
+            assert_eq!(a.observe_packet_info(&info), Err(InspectionError::Stopped));
+        }
     }
 }

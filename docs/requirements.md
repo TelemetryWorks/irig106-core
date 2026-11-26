@@ -141,6 +141,7 @@ aggregate CLI requirement receives verification credit.
 | L2-EDN-005 | L1-CORE-005 | Baseline is 106-24R1; preserve unknown codes and never infer recording edition from data-type version. |
 | L2-INV-006 | L1-CORE-006 | Bound channel/row state; count packets, DATA/packet bytes, lengths and raw data types with checked arithmetic and explicit limit failures. |
 | L2-SEQ-006 | L1-CORE-006 | Track sequence continuity per channel, including wrap; expose gaps as observations, not proof of packet loss. |
+| L2-INV-009 | L1-CORE-006 | Owner 2026-11-26 decision 3A: aggregate accepted whole-packet admission evidence with fixed checked counters for coverage, over-soft packets, each authorization kind and reported legacy-setup use. Capture events do not fabricate admission. Limit/overflow failures commit no inventory state; summaries report coverage and retained scope. |
 | L2-PRES-006 | L1-CORE-006 | Observe setup/index/event packet presence without validating contents; absence after incomplete scans is inconclusive. |
 | L2-PKG-007 | L1-CORE-007 | Use a virtual workspace at crates/irig106-core, edition 2024/MSRV 1.85, std-first, types 0.1 as sole ecosystem dependency. |
 | L2-REL-007 | L1-CORE-007 | Independent exact-head review and passing CI precede owner merge. Adopt org Trusted Publishing in slice 9; never publish locally or bypass approval. |
@@ -178,6 +179,7 @@ Coverage is clause-scoped in the slice evidence; planned probes are not passes.
 | L3-EDN-005 → L2-EDN-005 | Unknown type/version preserved; distinguish setup-record and data-type version mappings; no implicit edition. |
 | L3-INV-006 → L2-INV-006 | Independent totals; interleaved types; row/channel cap edges and arithmetic overflow; no growing packet/diagnostic vectors. |
 | L3-SEQ-006 → L2-SEQ-006 | 255→0, duplicate, discontinuity, interleaved channels and multiple types on one channel. |
+| L3-INV-009 → L2-INV-009 | Independently packed within-soft/next-header/exact-EOF/stream-opt-in/legacy fixtures assert each incremental count and overlapping facts; capture has zero coverage, limit/overflow failures are atomic, and output includes scoped evidence. Every scalar accepts exact u64::MAX then rejects overflow without changing counts/rows/sequence/recovery; warm allocation and memory gates remain. |
 | L3-PRES-006 → L2-PRES-006 | Setup/index/event observations; absent complete vs incomplete scan; no semantic validity claim. |
 | L3-PKG-007 → L2-PKG-007 | Metadata, registry-only dependency/default-feature boundary and package file checks; CI builds archived source. Header integration tests use the shared Rtc directly. |
 | L3-REL-007 → L2-REL-007 | Exact-head CI/review ledgers and unsigned publishing-path dry run in slice 9. Cryptographic/registry mutation paths have mocked controls; real release remains separately authorized. |

@@ -28,6 +28,7 @@ def main(binary):
         stdout, stderr = result.stdout.decode(), result.stderr.decode()
         assert result.returncode == code, (name, result.returncode, stdout, stderr)
         assert all(text in stdout for text in output), (name, stdout)
+        assert "admission=AdmissionCounts { evaluated_packets: 0, over_soft: 0, within_soft: 0" in stdout, stdout
         assert diagnostic in stderr if diagnostic else not stderr, (name, stderr)
         print(f"{name}: exit code, output and findings pass")
 

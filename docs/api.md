@@ -340,3 +340,28 @@ See [the consumer/streaming contract](streaming.md) for setup/time ordering,
 credit-return/shutdown rules, live-input limits and the proposed provisional
 Begin/Chunk/End/Abort protocol. Only the whole-packet example is implemented;
 no new streaming API or inventory admission counters are introduced.
+
+
+### Admission-evidence inventory (owner 2026-11-26, decision 3A)
+
+`Inspection::admission_counts()` returns non-exhaustive `AdmissionCounts`: fixed,
+checked u64 counters for evaluated_packets, over_soft, within_soft, next_header,
+unconfirmed_exact_eof, stream_opt_in and legacy_setup_any_channel. Only successful
+`observe_packet_info` observations contribute. Current authorization kinds
+partition evaluated_packets; over_soft and legacy are overlapping evidence facts.
+Legacy counts the reader's reported allowance use, not simply an enabled option.
+These are size-policy facts, not payload authenticity or checksum validation.
+
+Capture events lack admission evidence and leave these counters unchanged. Compare
+evaluated_packets with totals().packets for coverage; zero coverage is not proof
+that no oversoft input existed. Tails/refusals/errors add no complete observations;
+retained counts describe accepted input only, qualified by scan status/recovery.
+Every addition and ordinary inventory count is computed before committing state;
+limit/overflow failure preserves all prior counts, rows and sequence/recovery state.
+The counters add seven fixed scalars, no entry growth or warm-path allocation.
+
+Output change: the public `inspect` and `ordered` example summaries append
+`admission=AdmissionCounts { ... }`. Capture-only inspect reports evaluated_packets=0;
+ordered reports whole-packet evidence. Existing fields and exit policies remain.
+The examples' Debug output is illustrative, not a stable serialization format.
+See [verification](verification-v02-admission-counts.md).

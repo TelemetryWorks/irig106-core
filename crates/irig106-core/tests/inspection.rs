@@ -409,11 +409,24 @@ fn whole_tail_consumer_keeps_unseen_facts_unknown() {
 #[test]
 fn whole_admission_counts_partition_authorizations_and_report_coverage() {
     support::watchdog(std::time::Duration::from_secs(5), || {
-        use irig106_core::{BlockPool, PacketBuf, SourceStamp, StableSource, WholePacketReader, WholePolicy};
-        use std::{io::{self, Cursor, Read, Seek, SeekFrom}, time::{Duration, Instant}};
+        use irig106_core::{
+            BlockPool, PacketBuf, SourceStamp, StableSource, WholePacketReader, WholePolicy,
+        };
+        use std::{
+            io::{self, Cursor, Read, Seek, SeekFrom},
+            time::{Duration, Instant},
+        };
         struct Stable(Cursor<Vec<u8>>);
-        impl Read for Stable { fn read(&mut self, b: &mut [u8]) -> io::Result<usize> { self.0.read(b) } }
-        impl Seek for Stable { fn seek(&mut self, p: SeekFrom) -> io::Result<u64> { self.0.seek(p) } }
+        impl Read for Stable {
+            fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
+                self.0.read(b)
+            }
+        }
+        impl Seek for Stable {
+            fn seek(&mut self, p: SeekFrom) -> io::Result<u64> {
+                self.0.seek(p)
+            }
+        }
         impl StableSource for Stable {
             fn source_stamp(&mut self) -> io::Result<SourceStamp> {
                 Ok(SourceStamp::new(self.0.get_ref().len() as u64, 1, 0))
@@ -422,7 +435,15 @@ fn whole_admission_counts_partition_authorizations_and_report_coverage() {
         let mut inventory = Inspection::new(InspectionLimits::new(2, 3));
         assert_eq!(inventory.admission_counts(), Default::default());
         // WithinSoft; NextHeader; ExactEof; StreamOptIn; legacy used; legacy enabled but unused.
-        for case in 0..6 {
+        let expected = [
+            (1, 0, 1, 0, 0, 0, 0),
+            (2, 1, 1, 1, 0, 0, 0),
+            (3, 2, 1, 1, 1, 0, 0),
+            (4, 3, 1, 1, 1, 1, 0),
+            (5, 3, 2, 1, 1, 1, 1),
+            (6, 3, 3, 1, 1, 1, 1),
+        ];
+        for (case, expected) in expected.into_iter().enumerate() {
             let (channel, kind, data) = match case {
                 1..=3 => (0, 9, 524_292 - 24),
                 4 => (7, 1, 4),
@@ -430,25 +451,58 @@ fn whole_admission_counts_partition_authorizations_and_report_coverage() {
                 _ => (0, 9, 4),
             };
             let mut bytes = frame(channel, kind, data);
-            if case == 1 { bytes.extend(frame(0, 9, 4)); }
+            if case == 1 {
+                bytes.extend(frame(0, 9, 4));
+            }
             let pool = BlockPool::with_defaults().unwrap();
             let mut packet = PacketBuf::new(pool.clone()).unwrap();
-            let policy = WholePolicy::new().with_stream_opt_in(case == 3)
+            let policy = WholePolicy::new()
+                .with_stream_opt_in(case == 3)
                 .with_legacy_setup_any_channel(case >= 4);
             let until = Instant::now() + Duration::from_secs(2);
             if matches!(case, 1 | 2) {
-                let mut r = WholePacketReader::seek_checked(Stable(Cursor::new(bytes)), policy, pool).unwrap();
+                let mut r =
+                    WholePacketReader::seek_checked(Stable(Cursor::new(bytes)), policy, pool)
+                        .unwrap();
                 r.next_packet_into(&mut packet, until).unwrap();
             } else {
                 let mut r = WholePacketReader::stream(Cursor::new(bytes), policy, pool).unwrap();
                 r.next_packet_into(&mut packet, until).unwrap();
             }
-            inventory.observe_packet_info(packet.info().unwrap()).unwrap();
+            inventory
+                .observe_packet_info(packet.info().unwrap())
+                .unwrap();
+            let a = inventory.admission_counts();
+            assert_eq!(
+                (
+                    a.evaluated_packets,
+                    a.over_soft,
+                    a.within_soft,
+                    a.next_header,
+                    a.unconfirmed_exact_eof,
+                    a.stream_opt_in,
+                    a.legacy_setup_any_channel
+                ),
+                expected
+            );
         }
         let a = inventory.admission_counts();
-        assert_eq!((a.evaluated_packets, a.over_soft, a.within_soft, a.next_header,
-            a.unconfirmed_exact_eof, a.stream_opt_in, a.legacy_setup_any_channel), (6, 3, 3, 1, 1, 1, 1));
-        assert_eq!(a.evaluated_packets, a.within_soft + a.next_header + a.unconfirmed_exact_eof + a.stream_opt_in);
+        assert_eq!(
+            (
+                a.evaluated_packets,
+                a.over_soft,
+                a.within_soft,
+                a.next_header,
+                a.unconfirmed_exact_eof,
+                a.stream_opt_in,
+                a.legacy_setup_any_channel
+            ),
+            (6, 3, 3, 1, 1, 1, 1)
+        );
+        assert_eq!(
+            a.evaluated_packets,
+            a.within_soft + a.next_header + a.unconfirmed_exact_eof + a.stream_opt_in
+        );
         // Capture mode has no size authorization evidence; never invent WithinSoft.
         inventory.observe(&event(0, 9, 4)).unwrap();
         assert_eq!(inventory.totals().packets, 7);

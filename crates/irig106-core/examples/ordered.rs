@@ -187,10 +187,11 @@ fn run() -> Result<bool, Box<dyn Error>> {
         }
     }
     println!(
-        "packets={} status={:?} presence={:?}",
+        "packets={} status={:?} presence={:?} admission={:?}",
         inventory.totals().packets,
         inventory.status(),
-        inventory.presence()
+        inventory.presence(),
+        inventory.admission_counts()
     );
     Ok(failed)
 }
