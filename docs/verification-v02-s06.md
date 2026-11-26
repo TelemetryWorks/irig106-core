@@ -36,3 +36,19 @@ Temporary controls: replacing dispatched revisions with zero fails the independe
 summary oracle; reducing the return queue to one reproduces the circular wait
 and is killed by the 15-second subprocess watchdog. Both mutations were discarded
 and the production example rebuilt before the final fixture run.
+
+
+## Review correction: Time F2 and legacy setup notifications
+
+The new setup → type0x12 time → data fixture fails at the original head: both
+later packets still carry revision 1 and the time notification is absent. After
+the fix, channels 0 and 3 both advance to revision 2 before dispatch and worker
+revision sums prove that data received the updated snapshot. INT-045 recognizes
+0x11 on any channel and 0x12 from 106-17; the example enables F2 for its known
+24R1 edition policy, never for Unknown based on raw/version inference.
+
+An example unit matrix exercises known/unknown edition routing, channel-0 setup,
+nonzero-channel setup with explicit legacy policy on/off, and ordinary data with
+legacy enabled. CI explicitly runs this example unit test before the subprocess
+fixtures. Legacy notices use admission evidence; inventory setup_record remains
+channel-0 only. Library code, admission counters and read strategy are unchanged.

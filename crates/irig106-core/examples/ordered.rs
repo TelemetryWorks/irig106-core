@@ -1,7 +1,8 @@
 //! One ordered producer, channel-affine bounded workers, and returned owners.
 //! Structural demonstration only: control notifications do not parse setup/time.
 use irig106_core::{
-    BlockPool, Inspection, InspectionLimits, PacketBuf, WholeEvent, WholePacketReader, WholePolicy,
+    BlockPool, EditionPolicy, Inspection, InspectionLimits, PacketBuf, PacketInfo, WholeEvent,
+    WholePacketReader, WholePolicy,
 };
 use std::{
     error::Error,
@@ -24,6 +25,16 @@ struct Summary {
     data_bytes: u64,
     revision: u64,
     revision_sum: u64,
+}
+fn is_control(info: &PacketInfo) -> bool {
+    match info.header.data_type() {
+        0x01 => info.header.channel() == 0 || info.admission.legacy_setup_any_channel,
+        0x11 => true, // Time F1, any channel.
+        // Time F2 exists from 106-17. 24R1 is our only known edition policy;
+        // Unknown (including Unknown(17)) never earns this meaning by inference.
+        0x12 => matches!(info.admission.edition, EditionPolicy::Irig106_24R1),
+        _ => false,
+    }
 }
 fn worker(input: Receiver<Work>, returned: SyncSender<PacketBuf>) -> io::Result<Summary> {
     let mut summary = Summary::default();
@@ -63,6 +74,9 @@ fn run() -> Result<bool, Box<dyn Error>> {
     for _ in 0..SLOTS {
         free.push(PacketBuf::new(pool.clone())?);
     }
+    // The default 24R1 example assumes channel-0 setup. An explicit
+    // with_legacy_setup_any_channel(true) also enables nonzero-channel notices
+    // through admission evidence; never infer that option from packet contents.
     let mut reader = WholePacketReader::stream(io::stdin().lock(), WholePolicy::new(), pool)?;
     let mut inventory = Inspection::new(InspectionLimits::new(1024, 4096));
     // All four slots can be returned even while the producer is blocked reading.
@@ -89,9 +103,7 @@ fn run() -> Result<bool, Box<dyn Error>> {
                     let sequence = inventory.observe_packet_info(info)?;
                     // Downstream setup closure (INT-045) and time-epoch updates
                     // belong HERE, before fan-out, not independently in workers.
-                    if (info.header.channel() == 0 && info.header.data_type() == 1)
-                        || info.header.data_type() == 0x11
-                    {
+                    if is_control(info) {
                         revision = revision.checked_add(1).ok_or("revision overflow")?;
                         println!("control offset={} revision={revision}", info.offset);
                     }
@@ -156,6 +168,54 @@ fn main() -> ExitCode {
         Err(error) => {
             eprintln!("{error}");
             ExitCode::from(3)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn control_notifications_obey_edition_and_explicit_legacy_policy() {
+        // INT-045: F1 on any channel; F2 from 106-17 (known 24R1 here).
+        // The independent header fixture has P=28, DATA=4, no secondary/trailer.
+        for (channel, kind, edition, legacy, expected) in [
+            (0u16, 0x01, EditionPolicy::Irig106_24R1, false, true),
+            (7, 0x01, EditionPolicy::Irig106_24R1, false, false),
+            (7, 0x01, EditionPolicy::Irig106_24R1, true, true),
+            (7, 0x09, EditionPolicy::Irig106_24R1, true, false),
+            (7, 0x11, EditionPolicy::Unknown(7), false, true),
+            (0, 0x12, EditionPolicy::Irig106_24R1, false, true),
+            (7, 0x12, EditionPolicy::Irig106_24R1, false, true),
+            (7, 0x12, EditionPolicy::Unknown(17), false, false),
+        ] {
+            let mut bytes = [0u8; 28];
+            bytes[..2].copy_from_slice(&[0x25, 0xeb]);
+            bytes[2..4].copy_from_slice(&channel.to_le_bytes());
+            bytes[4..8].copy_from_slice(&28u32.to_le_bytes());
+            bytes[8..12].copy_from_slice(&4u32.to_le_bytes());
+            bytes[12] = 0xff; // Data-type version must not select the edition.
+            bytes[15] = kind;
+            let sum = bytes[..22].chunks_exact(2).fold(0u16, |s, w| {
+                s.wrapping_add(u16::from_le_bytes([w[0], w[1]]))
+            });
+            bytes[22..24].copy_from_slice(&sum.to_le_bytes());
+            let policy = WholePolicy::new()
+                .with_edition(edition)
+                .with_legacy_setup_any_channel(legacy);
+            let pool = BlockPool::with_defaults().unwrap();
+            let mut packet = PacketBuf::new(pool.clone()).unwrap();
+            let mut reader = WholePacketReader::stream(Cursor::new(bytes), policy, pool).unwrap();
+            reader
+                .next_packet_into(&mut packet, Instant::now() + WAIT)
+                .unwrap();
+            assert_eq!(
+                is_control(packet.info().unwrap()),
+                expected,
+                "channel={channel} kind={kind:#x} edition={edition:?} legacy={legacy}"
+            );
         }
     }
 }

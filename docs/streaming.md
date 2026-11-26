@@ -10,8 +10,16 @@ PacketInfo exactly once, in recording order, before fan-out; metadata inspection
 never waits for out-of-order worker results. No admission-evidence counters are
 added to the inventory; that owner question remains pending.
 
-The example notices channel0/type01 and type11 on the ordered path and attaches
-an increasing control revision to each work item. **These are header routing
+The default 106-24R1 example notices channel0/type01 setup and time types 0x11
+or 0x12 on **any channel**, attaching an increasing control revision to each
+work item. INT-045 includes Time F2 / Network Time (0x12) from 106-17 onward;
+24R1 is the only known EditionPolicy today, so Unknown never authorizes that
+interpretation, even if its raw code or Data Type Version resembles an edition.
+If the caller explicitly selects with_legacy_setup_any_channel(true), notices
+also cover type01 on nonzero channels using the admission evidence. The default
+does not infer legacy mode. Inventory setup_record presence remains **channel-0
+only**, even under the legacy allowance; a nonzero-channel setup notification
+does not change that structural presence rule. **These are header routing
 notifications, not setup parsing, setup closure or interpreted time epochs.**
 Downstream orchestration must perform setup closure (INT-045), validate/apply
 setup changes and resolve time references/epochs here before publishing a bounded

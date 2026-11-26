@@ -86,6 +86,7 @@ jobs:
           python3 scripts/test_inspect_example.py target/debug/examples/inspect
       - name: Run ordered whole-packet consumer fixtures
         run: |
+          cargo test -p irig106-core --example ordered --locked
           cargo build -p irig106-core --example ordered --locked
           python3 scripts/test_ordered_example.py target/debug/examples/ordered
       - run: cargo doc --workspace --no-deps --locked
