@@ -76,7 +76,7 @@ def measure(binary, case):
                 validate(sample, memory, ceiling)
                 peak = max(peak, memory)
                 print(line.strip(), flush=True)
-                p.stdin.write("\n")
+                p.stdin.write("+")
                 p.stdin.flush()
             assert p.wait(timeout=10) == 0, p.stderr.read()
             assert not p.stderr.read()

@@ -12,13 +12,13 @@ original = source.read_text()
 cases = [
     ("declared_preallocation", "bogus", "        let p = header.packet_length();", '''
         let p = header.packet_length();
-        let mut regression = Vec::new();
+        let mut regression = Vec::<u8>::new();
         regression.try_reserve_exact(p as usize).map_err(PoolError::from)?;
         regression.resize(p as usize, 0x5a);
         std::hint::black_box(&regression);
 '''),
     ("unbudgeted_retention", "admit", "        self.info = None;", '''
-        let mut regression = Vec::new();
+        let mut regression = Vec::<u8>::new();
         for span in self.frame_spans() { regression.extend_from_slice(span); }
         std::mem::forget(regression);
         self.info = None;

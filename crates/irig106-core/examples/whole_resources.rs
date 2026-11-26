@@ -91,7 +91,7 @@ fn checkpoint(phase: &str, pool: &BlockPool) -> Result<(), Box<dyn StdError>> {
     io::stdout().flush()?;
     let mut ack = [0]; // Host samples the STILL-LIVE process, then releases it.
     io::stdin().read_exact(&mut ack)?;
-    assert_eq!(ack, [b'\n']);
+    assert_eq!(ack, [b'+']);
     Ok(())
 }
 fn main() -> Result<(), Box<dyn StdError>> {

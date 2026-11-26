@@ -60,10 +60,10 @@ jobs:
       - name: Bounded warm-cache file read benchmark (informational)
         if: matrix.os == 'ubuntu-24.04'
         run: cargo test -p irig106-core --test whole --locked bounded_file_read_benchmark -- --ignored --exact --nocapture
-      - name: Small-body comparison (informational, 64 MiB per case)
+      - name: Small-body comparison (informational, 32 MiB per case)
         if: matrix.os == 'ubuntu-24.04'
         env:
-          IRIG106_SMALL_BODY_BENCH_BYTES: "67108864"
+          IRIG106_SMALL_BODY_BENCH_BYTES: "33554432"
         run: cargo test --release -p irig106-core --test read_strategy_bench --locked small_body_read_strategy_benchmark -- --ignored --exact --nocapture
 
   contract:

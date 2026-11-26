@@ -51,7 +51,7 @@ is claimed. No OOM/commit settings are changed.
   without changing credits; on 32-bit, aligned P=0xFFFFFFFC returns TargetLimit
   before payload allocation despite explicit H/stream authorization.
 - Performance uses the existing release-mode real-file direct/default-hybrid
-  comparison, 28/400/4096/65536/524288-byte frames, now 64 MiB per case and median
+  comparison, 28/400/4096/65536/524288-byte frames, now 32 MiB per case and median
   of three alternating-order warm-cache samples. Source reads are calibrated to
   Linux kernel read syscalls. Report packets/s and MB/s; no timing gate or strategy
   change, and no real-recording/geometric-refill claim.
