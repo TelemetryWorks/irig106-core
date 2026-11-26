@@ -89,17 +89,26 @@ above eight idle blocks. Trim toward eight only after storage from a large
 assembly (more than eight blocks) returns or under explicit budget pressure;
 pressure may release more. This hysteresis preserves allocation-free ordinary
 multi-worker bursts whose in-flight count swings by more than eight. The coordinator
-accepted this L3-HOT/DEFAULT/RSS clarification in the slice-2 assignment after
-#17 merged. Do not eagerly fill the idle baseline. Together
+explicitly accepts this change to the approved L3-HOT/DEFAULT/RSS wording in #18,
+implementing the owner's zero-steady-state-allocation direction.
+Do not eagerly fill the idle baseline. Together
 with measured process/control/allocator overhead, this small baseline must fit
 under the isolated tiny-input 32 MiB RSS ceiling.
 
-Default B holds at most 512 one-block packets by block bytes alone, fewer after
-metadata, scratch and idle storage. A maximum setup uses 256 blocks, leaving at
-most about 256 additional ordinary slots before overhead. A tiny packet still
-occupies a full 512 KiB block, so deep worker/queue pipelines encounter budget
-backpressure early. Size-class blocks are deferred unless later benchmarks
+Default B admits at most **511 one-block packets**, including idle and worker-held
+blocks, after pool control/lease charges. A maximum setup uses 256 blocks, leaving
+at most 255 additional blocks; later reader/workspace charges may reduce this.
+A tiny packet still occupies a full 512 KiB block, so deep worker/queue pipelines
+encounter budget backpressure early. Size-class blocks are deferred unless later
+benchmarks
 justify them while preserving one-piece/direct-read behavior; not implemented now.
+
+After a burst, idle storage can stay up to the caller's accounted budget B
+(at default B, about **511 blocks / 256 MiB resident**) until a large packet returns
+and its owner calls trim_after_return(), or trim_for_pressure() is called.
+**Nothing trims automatically.** Retention never exceeds the caller's budget;
+callers wanting lower residency choose a lower budget at construction or call
+trim. Process/allocator overhead remains outside the accounted block budget.
 
 ## L1: responsibilities
 

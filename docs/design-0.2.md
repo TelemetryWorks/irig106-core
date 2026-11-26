@@ -175,18 +175,18 @@ high-water working set under B. Trim toward eight only when storage from a
 large assembly (more than eight actual blocks) returns, or under explicit budget
 pressure; pressure may release more, down to zero. This hysteresis avoids
 allocation churn when a multi-worker pipeline swings by more than eight blocks.
-The coordinator accepted this hysteresis clarification in the slice-2 assignment
-after #17 merged; the L3-HOT/DEFAULT/RSS updates record that instruction. Live worker-owned blocks are
+The coordinator explicitly accepts this change to the approved L3-HOT/DEFAULT/RSS
+wording in #18, implementing the owner's zero-steady-state-allocation direction.
+Live worker-owned blocks are
 not idle and remain charged until returned. Keep metadata/control overhead
 bounded and measured so the 4 MiB idle payload footprint plus process baseline
 fits comfortably below the isolated 32 MiB tiny-input RSS ceiling.
 
-At default B, block bytes alone allow **at most 512 one-block packets** live;
-metadata, control scratch and idle capacity reduce the usable count. A maximum
-setup holds 256 blocks, leaving at most about 256 additional ordinary-packet
-slots before that overhead. Even a tiny packet occupies a full 512 KiB block,
-so worker/queue depth can reach backpressure while valid payload bytes remain
-small. These are upper bounds, not promises that all 512 slots are available.
+At default B the pool admits **at most 511 one-block packets**, including idle
+and worker-held blocks, after its control/lease metadata charges. A maximum setup
+holds 256 blocks, leaving at most 255 additional blocks; later reader/workspace
+accounting may reduce this further. Even a tiny packet occupies a full 512 KiB
+block, so worker/queue depth can reach backpressure with few valid payload bytes.
 Size-class blocks are a possible later optimization only if benchmarks justify
 it and the one-piece/direct-read requirements remain satisfied; not this slice.
 
@@ -386,11 +386,11 @@ not the declared length. Counts above eight trim; an explicit pressure call is
 the other trigger. Whole-packet assembly/valid-byte views, hard/soft admission,
 source-stability checks, direct I/O and coalescing remain later slices.
 
-At default B the current pool implementation admits at most **511** blocks after
-its control/per-block metadata charges (the 512 figure above is only a theoretical
-block-byte bound). A 256-block setup leaves at most 255 other pool blocks; later
-reader/workspace accounting may reduce this further. After a high-water ordinary
-burst, idle payload can remain near B until an explicit large-return or pressure
-trim; no automatic background pressure monitor exists. This retained-memory
-tradeoff is the coordinator-approved hysteresis behavior, not a promise of 4 MiB
-idle storage after every burst.
+After a burst, idle storage can stay up to the caller's accounted budget B
+(at default B, about **511 blocks / 256 MiB resident**) until a large packet returns
+and its owner calls trim_after_return(), or trim_for_pressure() is called.
+**Nothing trims automatically.** Retention never exceeds the caller's budget;
+callers wanting lower residency choose a lower budget at construction or call
+trim. Process/allocator overhead remains outside the accounted block budget.
+This is the coordinator-accepted hysteresis tradeoff, not a promise of 4 MiB idle
+storage after every burst.

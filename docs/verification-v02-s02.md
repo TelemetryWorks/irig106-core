@@ -71,3 +71,12 @@ One-off controls removed the block-return notification and assembly-release
 assignment separately. The integration test failed in 5.06 s and immediately,
 respectively (both exit 101); healthy code was restored. These are bounded test
 failures, not CI job timeouts.
+
+The coordinator explicitly accepts the L3-HOT/DEFAULT/RSS hysteresis wording change
+in #18 as implementing the owner's zero-steady-state-allocation direction.
+Default capacity is 511 blocks after pool metadata, not a block-byte-only count.
+Idle storage can remain up to B after an ordinary burst until explicit trim; the
+API/design/requirements record lower-budget or trim choices for lower residency.
+Review items 3/4 were already implemented: cold allocation/zeroing occurs outside
+the lock after a claim; stats/returns can proceed. The bounded worker watchdogs
+and discarded lost-notification/release controls above cover fast test failure.

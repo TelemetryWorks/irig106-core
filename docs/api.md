@@ -212,8 +212,12 @@ Pool-wide cancel() is terminal, clears idle storage/credits and wakes both waits
 Cold allocation/zeroing occurs outside the mutex with credits claimed first;
 cancellation or allocator failure rolls that claim back. At default B, control
 and lease charges leave at most 511 blocks, including idle and worker-held blocks.
-Ordinary high-water idle storage can remain near B until explicit trim; there
-is no automatic pressure monitor. PoolError
+After a burst, idle storage can stay up to B (about 511 blocks / 256 MiB resident
+at defaults) until a large packet returns and its owner calls trim_after_return(),
+or trim_for_pressure() is called. Nothing trims automatically. Retention never
+exceeds the caller's accounted budget; choose a lower budget at construction or
+call trim for lower residency. Process/allocator overhead is outside this budget.
+PoolError
 preserves typed budget/allocation/synchronization failures; PoolStats is accounted
 storage, not RSS. No new dependencies or unsafe library code. See
 [slice-2 evidence](verification-v02-s02.md) for partial requirement coverage;
