@@ -1140,3 +1140,136 @@ fn recovery_chunk_boundaries_and_short_interrupted_input_keep_exact_bytes_case()
         assert_eq!(buf.contiguous().unwrap(), frame(28, 0, 9, 0));
     }
 }
+
+struct HybridProbe {
+    input: Cursor<Vec<u8>>,
+    observations: std::sync::Arc<std::sync::Mutex<Vec<(u64, usize, usize)>>>,
+}
+impl Read for HybridProbe {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        let position = self.input.position();
+        self.observations
+            .lock()
+            .unwrap()
+            .push((position, out.as_ptr() as usize, out.len()));
+        let wanted = if position == 0 {
+            out.len().min(24)
+        } else {
+            out.len()
+        };
+        self.input.read(&mut out[..wanted])
+    }
+}
+#[test]
+fn hybrid_cutoff_selects_copy_or_final_destination_and_preserves_next_header() {
+    watchdog(Duration::from_secs(5), || {
+        assert_eq!(WholePolicy::new().read_ahead_bytes(), 65_536);
+        assert_eq!(WholePolicy::new().small_body_cutoff(), 4096);
+        for (body, cutoff, copy) in [
+            (4092usize, 4096, true),
+            (4096, 4096, false),
+            (4092, 4092, false),
+        ] {
+            let pool = BlockPool::with_defaults().unwrap();
+            let mut buf = PacketBuf::new(pool.clone()).unwrap();
+            let expected = frame((body + 24) as u32, 0, 9, 0);
+            let mut bytes = expected.clone();
+            bytes.extend(frame(28, 1, 9, 0));
+            let observations = std::sync::Arc::new(std::sync::Mutex::new(Vec::with_capacity(8)));
+            let input = HybridProbe {
+                input: Cursor::new(bytes),
+                observations: observations.clone(),
+            };
+            let mut r = WholePacketReader::stream(
+                input,
+                WholePolicy::new().with_small_body_cutoff(cutoff),
+                pool,
+            )
+            .unwrap();
+            r.next_packet_into(&mut buf, deadline()).unwrap();
+            let packet = buf.contiguous().unwrap();
+            assert_eq!(packet, expected);
+            let records = observations.lock().unwrap();
+            let (_, destination, requested) = records[1];
+            assert_eq!(destination == packet.as_ptr() as usize + 24, !copy);
+            assert_eq!(requested, if copy { 65_536 } else { body });
+            drop(records);
+            assert_eq!(r.position(), (body + 24) as u64);
+            r.next_packet_into(&mut buf, deadline()).unwrap();
+            assert_eq!(buf.contiguous().unwrap(), frame(28, 1, 9, 0));
+        }
+    });
+}
+#[test]
+fn hybrid_fully_buffered_body_copies_even_with_zero_cutoff() {
+    watchdog(Duration::from_secs(5), || {
+        let pool = BlockPool::with_defaults().unwrap();
+        let mut buf = PacketBuf::new(pool.clone()).unwrap();
+        let mut r = WholePacketReader::stream(
+            Counted {
+                input: Cursor::new(frame(128, 0, 9, 0)),
+                calls: 0,
+            },
+            WholePolicy::new().with_small_body_cutoff(0),
+            pool,
+        )
+        .unwrap();
+        r.next_packet_into(&mut buf, deadline()).unwrap();
+        assert_eq!(buf.contiguous().unwrap(), frame(128, 0, 9, 0));
+        assert_eq!(r.into_inner().calls, 1);
+    });
+}
+#[test]
+fn hybrid_large_final_fragment_stays_direct_and_buffer_is_budgeted() {
+    watchdog(Duration::from_secs(5), || {
+        let pool = BlockPool::with_defaults().unwrap();
+        let mut buf = PacketBuf::new(pool.clone()).unwrap();
+        let before = pool.stats().unwrap();
+        let observations = std::sync::Arc::new(std::sync::Mutex::new(Vec::with_capacity(8)));
+        let input = HybridProbe {
+            input: Cursor::new(frame(524_292, 0, 9, 0)),
+            observations: observations.clone(),
+        };
+        let mut r = WholePacketReader::stream(
+            input,
+            WholePolicy::new().with_stream_opt_in(true),
+            pool.clone(),
+        )
+        .unwrap();
+        assert!(pool.stats().unwrap().used_bytes >= before.used_bytes + 65_536);
+        assert_eq!(pool.stats().unwrap().allocated_blocks, 0);
+        r.next_packet_into(&mut buf, deadline()).unwrap();
+        let last = buf.frame_spans().last().unwrap();
+        assert_eq!(last.len(), 4);
+        let records = observations.lock().unwrap();
+        let (_, pointer, requested) = *records.last().unwrap();
+        assert_eq!(requested, 4);
+        assert_eq!(pointer, last.as_ptr() as usize);
+        drop(records);
+        drop(r);
+        buf.clear();
+        assert!(pool.stats().unwrap().used_bytes <= DEFAULT_POOL_BUDGET);
+    });
+}
+#[test]
+fn hybrid_invalid_buffer_configuration_is_typed_before_allocation() {
+    watchdog(Duration::from_secs(5), || {
+        let pool = BlockPool::with_defaults().unwrap();
+        let before = pool.stats().unwrap().used_bytes;
+        for bytes in [0, 23, usize::MAX] {
+            let result = WholePacketReader::stream(
+                &[][..],
+                WholePolicy::new().with_read_ahead_bytes(bytes),
+                pool.clone(),
+            );
+            assert!(matches!(
+                result.err().unwrap().reason,
+                ErrorKind::Pool {
+                    source: PoolError::InvalidRequest,
+                    ..
+                }
+            ));
+            assert_eq!(pool.stats().unwrap().used_bytes, before);
+        }
+    });
+}
