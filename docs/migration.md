@@ -112,7 +112,8 @@ partition; Unconfirmed(ExactEof) retains its uncertainty. See [API scope](api.md
   512 KiB blocks, 64 KiB read-ahead and 4 KiB cutoff do not preallocate H/B.
   A tiny whole packet still occupies a block; queue depth needs its own bound.
   Ordinary returns retain warm capacity, not an automatic eight-block idle cap.
-- DataChecksumState is non-exhaustive: retain a `_` arm and handle Verified and
+- Do not cast DataChecksumState with `as`; it now has data-carrying variants.
+  DataChecksumState is non-exhaustive: retain a `_` arm and handle Verified and
   Mismatch explicitly. Whole/chunk verification is ON, opt-out yields NotChecked;
   Mismatch is delivered evidence, not a default error or payload-validity claim.
   Inspection::data_checksum_counts() reports absent/not_checked/verified/mismatch.
