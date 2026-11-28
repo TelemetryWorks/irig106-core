@@ -43,7 +43,7 @@ Planned API boundary: the shared PacketReader framing engine gains an explicit
 whole-packet mode configured with a non_exhaustive resource policy and shared
 budget handle. It returns PacketBuf ownership plus header/ranges/offset, soft
 violation and authorization evidence; borrowed views expose complete spans and
-DATA ranges. Tail/error/NoCompletePacket rules remain typed and terminal. Builder
+DATA ranges. Tail/NoCompletePacket and non-size-error rules remain typed and terminal. Builder
 constructors select SeekChecked or StreamOptIn; existing bounded-prefix callers
 keep their contract. Exact method names are deferred to the implementation review.
 
@@ -499,3 +499,21 @@ are returnable and do not make later frame feasibility permanently fail. The nex
 approved feature is whole-mode incremental data-checksum verification, default ON
 with explicit opt-out, then reported drain and callback-scoped chunk delivery.
 Those features are not implemented by this coalescing PR; no release is implied.
+
+
+Explicit drain is now implemented separately from parked checksum PR #29; see
+[drain contract and evidence](verification-v02-drain.md). It is an explicit
+omission with fixed charged scratch, typed disposition/progress, cooperative
+cancellation/deadlines and no whole-admission or inventory credit. Callback chunk
+delivery remains the next separate implementation.
+
+
+Owner Q7/Q8, 2026-11-28: packet-data checksum verification is ON by default with
+an opt-out (#29 merged). Choose drain option A, with no automatic WholePolicy
+mode: H/B/target whole-delivery refusals retain one validated header/ranges and
+recovery at logical offset+24. The caller may explicitly drain that frame or
+stop; retrying whole delivery retries the same frame. Other failures stay terminal.
+Read-ahead and the retained header are fixed charged metadata/storage; no source
+rewind, body allocation or silent discard occurs on refusal. Tests cover H/B
+refusal→drain→next frame, stop/no automatic drain, recovery retention and the
+full target-limit path on i686 with a CI-only synthetic 4 GiB drain.

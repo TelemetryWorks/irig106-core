@@ -392,6 +392,28 @@ not inside allocation/page faults. PoolStats::coalesced_bytes are returnable liv
 credits, included in used_bytes and released after storage. See [evidence](verification-v02-coalescing.md).
 
 
+### Explicit omission with drain
+
+`WholePacketReader::drain_next(deadline)` returns DrainEvent::Report with offset,
+header/declared ranges, requested/consumed frame bytes, recovery, reason and
+Drained/Truncated disposition. Errors return DrainError with typed error and an
+Aborted report when a header was available. Header-finding tails remain separate
+DrainEvent::Tail. No PacketInfo, successful chunk End or inventory observation.
+
+This explicit call consumes a declared remainder even above H/B/target whole
+limits, using fixed charged scratch with no packet credits or assembly wait.
+It does not corroborate or authorize whole delivery; contents stay unverified.
+Normal next_packet_into never falls back. Owner Q8 (2026-11-28) makes only
+H/B/target size refusals positioned and nonterminal; drain_next then consumes
+that same cached header/body, or the caller may stop. Interrupted
+retries preserve progress; deadlines/cancellation are cooperative including
+recovery. Source mutation, I/O error, deadline, cancellation and truncation are
+terminal. No body rescan or silent prefix. A complete omission establishes framing
+for EOF/tail handling only. Mark unfiltered inventory incomplete and invalidate
+omitted setup/time context as appropriate. See [streaming contract](streaming.md)
+and [drain evidence](verification-v02-drain.md). Chunk delivery remains pending.
+
+
 ### Whole-mode packet-data checksums (owner 2026-11-26)
 
 Verification is ON by default. Explicit `WholePolicy::with_data_checksum_verification(false)`
@@ -408,3 +430,13 @@ into absent/not_checked/verified/mismatch; capture and opt-out report coverage
 explicitly. Counters commit atomically with existing inventory state. Example
 summaries append `data_checksums=...`; they retain counts after errors and keep
 their existing exit policy. See [scope and cost evidence](verification-v02-data-checksum.md).
+
+
+Q8 positioned refusal detail: `refused_header()` borrows the checked primary.
+`position()` stays at frame offset + 24; body bytes are not logically consumed.
+Fixed read-ahead may already hold payload bytes. Retrying whole delivery retries
+the SAME frame and recovery evidence, never skips it. Only H/B/target size errors
+are nonterminal; Uncorroborated, allocation, cancellation/deadline, source/I/O and
+structural failures remain terminal. into_inner discards cached header/read-ahead;
+stopping does not rewind the underlying transport. The cache is one fixed
+metadata record charged through reader size at construction, never a body buffer.

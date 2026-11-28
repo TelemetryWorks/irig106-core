@@ -11,6 +11,8 @@ use std::{
     mem,
     time::Instant,
 };
+mod drain;
+pub use drain::{DrainDisposition, DrainError, DrainEvent, DrainReason, DrainReport};
 const QUANTUM: usize = 4096;
 /// Complete-frame routing and admission evidence; never a payload interpretation.
 #[derive(Debug, Clone)]
@@ -240,6 +242,12 @@ pub enum WholeEvent {
         recovery: Option<Recovery>,
     },
 }
+struct PendingFrame {
+    offset: u64,
+    header: Header,
+    ranges: PacketRanges,
+    recovery: Option<Recovery>,
+}
 struct SourceOps<R> {
     stamp: fn(&mut R) -> io::Result<SourceStamp>,
     probe: fn(&mut R, u64) -> io::Result<bool>,
@@ -247,13 +255,15 @@ struct SourceOps<R> {
 }
 /// Ordered whole-packet reader with budgeted hybrid read-ahead and pooled bodies.
 /// Source starts at offset zero. No fallback to capture/drain/chunk delivery.
-/// Errors/tails are terminal. Wait deadlines do not interrupt arbitrary blocking Read.
+/// H/B/target size refusals retain their validated header for explicit drain or
+/// retry; other errors/tails are terminal. Deadlines cannot interrupt blocking I/O.
 pub struct WholePacketReader<R> {
     framing: PacketReader<R>,
     policy: WholePolicy,
     previous_large: bool,
     pool: BlockPool,
     source: Option<SourceOps<R>>,
+    refused: Option<PendingFrame>,
     _workspace: Workspace,
 }
 impl<R: Read> WholePacketReader<R> {
@@ -295,17 +305,54 @@ impl<R: Read> WholePacketReader<R> {
             previous_large: false,
             pool,
             source: None,
+            refused: None,
             _workspace: workspace,
         })
     }
     /// Return the exclusive source, discarding pending read-ahead.
     /// Its physical cursor may be ahead of position() by the configured buffer size.
+    /// Any cached refused header is discarded too; this is not a stream rewind.
     pub fn into_inner(self) -> R {
         self.framing.into_inner()
     }
     /// Consumed logical position, excluding restored lookahead probes.
     pub fn position(&self) -> u64 {
         self.framing.position
+    }
+    /// Validated header retained after an H/B/target refusal, not a packet.
+    /// position() is its offset + 24; no body bytes have been logically consumed.
+    pub fn refused_header(&self) -> Option<&Header> {
+        self.refused.as_ref().map(|p| &p.header)
+    }
+    fn next_header_checked(
+        &mut self,
+        check: &mut impl FnMut() -> Result<(), ErrorKind>,
+    ) -> Result<FrameStart, ErrorKind> {
+        if let Some(p) = self.refused.take() {
+            self.framing.recovery = p.recovery;
+            return Ok(FrameStart::Header {
+                offset: p.offset,
+                header: p.header,
+                ranges: p.ranges,
+            });
+        }
+        let limit = if self.previous_large { 24 } else { usize::MAX };
+        self.framing.find_header_checked(limit, check)
+    }
+    fn size_refusal(
+        &mut self,
+        offset: u64,
+        header: &Header,
+        ranges: &PacketRanges,
+        reason: ErrorKind,
+    ) -> ErrorKind {
+        self.refused = Some(PendingFrame {
+            offset,
+            header: *header,
+            ranges: ranges.clone(),
+            recovery: self.framing.recovery,
+        });
+        reason
     }
     /// Consume one frame into reusable storage, using one absolute budget deadline.
     /// Holding prior frames on the same thread requires a deadline or releasing them.
@@ -318,13 +365,27 @@ impl<R: Read> WholePacketReader<R> {
         if self.framing.done {
             return Ok(None);
         }
-        self.framing.recovery = None;
+        self.framing.recovery = self.refused.as_ref().and_then(|p| p.recovery);
         let result = self.next_inner(buf, deadline);
         if !matches!(result, Ok(Some(WholeEvent::Packet))) {
             buf.clear();
         }
         result.map_err(|reason| {
-            self.framing.done = true;
+            let positioned = self.refused.is_some()
+                && matches!(
+                    &reason,
+                    ErrorKind::Admission {
+                        source: AdmissionError::HardLimit { .. } | AdmissionError::TargetLimit,
+                        ..
+                    } | ErrorKind::Pool {
+                        source: PoolError::BudgetTooSmall { .. },
+                        ..
+                    }
+                );
+            self.framing.done = !positioned;
+            if !positioned {
+                self.refused = None;
+            }
             Error {
                 reason,
                 position: self.framing.position,
@@ -383,8 +444,7 @@ impl<R: Read> WholePacketReader<R> {
         }
         // Predict only header-refill size, never body delivery/copy policy.
         // No previous frame (and a previous small body) keeps full amortisation.
-        let header_limit = if self.previous_large { 24 } else { usize::MAX };
-        let (offset, header, mut ranges) = match self.framing.find_header_limited(header_limit)? {
+        let (offset, header, mut ranges) = match self.next_header_checked(&mut || Ok(()))? {
             FrameStart::Header {
                 offset,
                 header,
@@ -394,22 +454,45 @@ impl<R: Read> WholePacketReader<R> {
         };
         let p = header.packet_length();
         if p > self.policy.hard {
-            return Err(AdmissionError::HardLimit {
-                length: p,
-                limit: self.policy.hard,
-            }
-            .into());
+            return Err(self.size_refusal(
+                offset,
+                &header,
+                &ranges,
+                AdmissionError::HardLimit {
+                    length: p,
+                    limit: self.policy.hard,
+                }
+                .into(),
+            ));
         }
-        let length = usize::try_from(p)
+        let Some(length) = usize::try_from(p)
             .ok()
             .filter(|n| *n <= isize::MAX as usize)
-            .ok_or(AdmissionError::TargetLimit)?;
-        let end = offset
-            .checked_add(u64::from(p))
-            .ok_or(AdmissionError::TargetLimit)?;
+        else {
+            return Err(self.size_refusal(
+                offset,
+                &header,
+                &ranges,
+                AdmissionError::TargetLimit.into(),
+            ));
+        };
+        let Some(end) = offset.checked_add(u64::from(p)) else {
+            return Err(self.size_refusal(
+                offset,
+                &header,
+                &ranges,
+                AdmissionError::TargetLimit.into(),
+            ));
+        };
         let count = length.div_ceil(BLOCK_BYTES);
         // Refusal/known-short paths do not wait for an unrelated active build.
-        self.pool.frame_feasible(count)?;
+        if let Err(e) = self.pool.frame_feasible(count) {
+            return Err(if matches!(e, PoolError::BudgetTooSmall { .. }) {
+                self.size_refusal(offset, &header, &ranges, e.into())
+            } else {
+                e.into()
+            });
+        }
         let mut evidence = self.policy.evidence(&header);
         let before = self.stamp()?;
         if let Some(stamp) = before {
@@ -445,7 +528,16 @@ impl<R: Read> WholePacketReader<R> {
             }
         }
         // Rechecks feasibility after any intervening constructor; one build per B.
-        let mut assembly = self.pool.begin_until(count, deadline)?;
+        let mut assembly = match self.pool.begin_until(count, deadline) {
+            Ok(a) => a,
+            Err(e) => {
+                return Err(if matches!(e, PoolError::BudgetTooSmall { .. }) {
+                    self.size_refusal(offset, &header, &ranges, e.into())
+                } else {
+                    e.into()
+                });
+            }
+        };
         // Choose once for the entire body, not a short read or final fragment.
         let body = length - 24;
         let copy_body = body < self.policy.small_body || self.framing.buffered() >= body;

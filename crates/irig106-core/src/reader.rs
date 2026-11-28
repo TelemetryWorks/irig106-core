@@ -196,10 +196,15 @@ impl<R: Read> PacketReader<R> {
     pub(crate) fn buffered(&self) -> usize {
         self.scratch.as_ref().map_or(0, |b| b.available - b.used)
     }
-    fn refill(&mut self, limit: usize) -> Result<usize, ErrorKind> {
+    fn refill_checked(
+        &mut self,
+        limit: usize,
+        check: &mut impl FnMut() -> Result<(), ErrorKind>,
+    ) -> Result<usize, ErrorKind> {
         let scratch = self.scratch.as_mut().unwrap();
         let requested = scratch.bytes.len().min(limit);
         loop {
+            check()?;
             match self.input.read(&mut scratch.bytes[..requested]) {
                 Ok(n) => {
                     scratch.used = 0;
@@ -245,8 +250,18 @@ impl<R: Read> PacketReader<R> {
         prefetch: bool,
         refill_limit: usize,
     ) -> Result<usize, ErrorKind> {
+        self.read_checked(out, prefetch, refill_limit, &mut || Ok(()))
+    }
+    pub(crate) fn read_checked(
+        &mut self,
+        out: &mut [u8],
+        prefetch: bool,
+        refill_limit: usize,
+        check: &mut impl FnMut() -> Result<(), ErrorKind>,
+    ) -> Result<usize, ErrorKind> {
         let mut total = 0;
         while total < out.len() {
+            check()?;
             let buffered = if let Some(scratch) = &mut self.scratch {
                 let n = (scratch.available - scratch.used).min(out.len() - total);
                 out[total..total + n]
@@ -262,7 +277,7 @@ impl<R: Read> PacketReader<R> {
                 continue;
             }
             if prefetch && self.scratch.is_some() {
-                if self.refill(refill_limit)? == 0 {
+                if self.refill_checked(refill_limit, check)? == 0 {
                     break;
                 }
                 continue;
@@ -343,9 +358,16 @@ impl<R: Read> PacketReader<R> {
         &mut self,
         refill_limit: usize,
     ) -> Result<FrameStart, ErrorKind> {
+        self.find_header_checked(refill_limit, &mut || Ok(()))
+    }
+    pub(crate) fn find_header_checked(
+        &mut self,
+        refill_limit: usize,
+        check: &mut impl FnMut() -> Result<(), ErrorKind>,
+    ) -> Result<FrameStart, ErrorKind> {
         let start = self.position;
         let mut b = [0; 24];
-        match self.read_with(&mut b, true, refill_limit)? {
+        match self.read_checked(&mut b, true, refill_limit, check)? {
             0 => {
                 self.done = true;
                 return if self.established {
@@ -378,7 +400,7 @@ impl<R: Read> PacketReader<R> {
                 }
             }
             b.copy_within(1.., 0);
-            if self.read_counted(&mut b[23..])? == 0 {
+            if self.read_checked(&mut b[23..], true, usize::MAX, check)? == 0 {
                 return self
                     .tail(start, TailKind::Unsynchronized)
                     .map(FrameStart::End);
