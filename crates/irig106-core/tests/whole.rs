@@ -1955,3 +1955,27 @@ fn explicit_drain_success_and_deadline_error_allocate_nothing() {
         ));
     });
 }
+
+#[test]
+fn chunk_transfer_and_deadline_error_allocate_nothing() {
+    watchdog(Duration::from_secs(5), || {
+        let pool = BlockPool::with_defaults().unwrap();
+        let mut r = WholePacketReader::stream(
+            Cursor::new(frame(8236, 0, 9, 0x83)),
+            WholePolicy::new(),
+            pool.clone(),
+        )
+        .unwrap();
+        ALLOCATIONS.with(|c| c.set(Some(0)));
+        let result = r.next_chunks(deadline(), |_| Ok::<(), io::Error>(()));
+        let count = ALLOCATIONS.with(|c| c.replace(None).unwrap());
+        assert_eq!(count, 0);
+        assert!(matches!(result, Ok(Some(ChunkOutcome::End(_)))));
+        assert_eq!(pool.stats().unwrap().allocated_blocks, 0);
+        ALLOCATIONS.with(|c| c.set(Some(0)));
+        let result = r.next_chunks(Instant::now(), |_| Ok::<(), io::Error>(()));
+        let count = ALLOCATIONS.with(|c| c.replace(None).unwrap());
+        assert_eq!(count, 0);
+        assert!(result.is_err());
+    });
+}

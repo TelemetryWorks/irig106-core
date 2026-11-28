@@ -517,3 +517,24 @@ Read-ahead and the retained header are fixed charged metadata/storage; no source
 rewind, body allocation or silent discard occurs on refusal. Tests cover H/B
 refusal→drain→next frame, stop/no automatic drain, recovery retention and the
 full target-limit path on i686 with a CI-only synthetic 4 GiB drain.
+
+
+## Final feature: explicit chunk implementation
+
+The [callback-scoped protocol](streaming.md#explicit-callback-scoped-chunk-delivery)
+is implemented by next_chunks as a separate opt-in mode. Begin/Chunk/Abort are
+callbacks; the returned End alone commits. A fixed 4 KiB charged scratch plus
+1,024 bytes of fixed control workspace require no packet blocks/assembly or
+credit waits. Whole-frame B/isize allocation limits do not apply to streaming
+storage; H, soft authorization and stable-source guarantees still apply. End
+reports Q7 incremental checksum verification (default ON, opt-out available),
+secondary integrity and admission, but is never PacketInfo/Inspection input.
+Q8 whole-size refusal can be followed by explicit chunk transfer if authorized,
+or explicit drain. Known-short stable input keeps truncation-only handling.
+
+Earlier slice-boundary statements above are historical snapshots: counters,
+coalescing, checksum verification, drain and chunk delivery are now implemented
+in their respective PRs, subject to exact-head review/CI; no release is implied.
+See [chunk evidence](verification-v02-chunks.md). Async scheduling, transport
+reassembly, semantic setup/time closure and decoder transaction rollback remain
+orchestrator responsibilities. No read-policy or geometric-refill change is made.

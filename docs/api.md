@@ -411,7 +411,7 @@ recovery. Source mutation, I/O error, deadline, cancellation and truncation are
 terminal. No body rescan or silent prefix. A complete omission establishes framing
 for EOF/tail handling only. Mark unfiltered inventory incomplete and invalidate
 omitted setup/time context as appropriate. See [streaming contract](streaming.md)
-and [drain evidence](verification-v02-drain.md). Chunk delivery remains pending.
+and [drain evidence](verification-v02-drain.md). Chunk delivery is explicitly available as described below.
 
 
 ### Whole-mode packet-data checksums (owner 2026-11-26)
@@ -440,3 +440,40 @@ are nonterminal; Uncorroborated, allocation, cancellation/deadline, source/I/O a
 structural failures remain terminal. into_inner discards cached header/read-ahead;
 stopping does not rewind the underlying transport. The cache is one fixed
 metadata record charged through reader size at construction, never a body buffer.
+
+
+### Explicit provisional chunk transfer
+
+```rust
+use irig106_core::{BlockPool, ChunkEvent, ChunkOutcome, WholePacketReader, WholePolicy};
+use std::{io, time::{Duration, Instant}};
+let mut reader = WholePacketReader::stream(&b""[..], WholePolicy::new(), BlockPool::with_defaults()?)?;
+let result = reader.next_chunks(Instant::now() + Duration::from_secs(1), |event| {
+    match event {
+        ChunkEvent::Begin(_) => { /* open provisional decoder transaction */ }
+        ChunkEvent::Chunk(c) => { /* borrow c.data only for this callback */ let _ = c.data; }
+        ChunkEvent::Abort(_) => { /* invalidate provisional output */ }
+        _ => {}
+    }
+    Ok::<(), io::Error>(())
+});
+if let Ok(Some(ChunkOutcome::End(end))) = result {
+    // Commit staged output only here, after checking final integrity evidence.
+    let _ = end.ranges.data_checksum;
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The fixed 4 KiB CHUNK_BYTES workspace and fixed control metadata are budgeted
+at reader construction; next_chunks needs no packet blocks or credit waits.
+Callbacks return caller-owned errors without boxing; ChunkError retains both the
+original cause and any failed Abort notification. Borrowed frame bytes and DATA
+intersections cannot escape the callback. H/soft authorization still applies;
+whole-frame B/isize storage does not. Q8 positioned whole-size refusals can be
+followed by explicit chunk transfer when H/authorization allows, or explicit drain.
+End is a returned ChunkOutcome, never a callback or PacketInfo. Source mutation,
+truncation, sink/I/O failure, cancellation or deadline prevents End and invalidates
+provisional bytes. Received/offered/acknowledged progress is distinguished;
+Interrupted retries preserve it and WouldBlock is terminal. Deadlines are
+cooperative and cannot preempt blocking I/O/callbacks. See [protocol, inventory
+scope and rollback obligations](streaming.md#explicit-callback-scoped-chunk-delivery).

@@ -95,56 +95,72 @@ Omitted setup/time may invalidate orchestrator context; no setup closure or time
 continuity may be inferred from draining their headers. Drained payload bytes
 cannot enter worker queues. See [drain verification](verification-v02-drain.md).
 
-## Optional incremental chunk delivery: contract, not an implemented API
+## Explicit callback-scoped chunk delivery
 
-Whole-packet delivery remains the default. L2-WHOLE-008's approved drain/chunk
-options are explicit modes, never automatic fallbacks from H/B refusal, allocation
-failure or deadline expiry. The following names describe protocol concepts, not
-new chunk Rust types/methods. Explicit drain is implemented above; chunk delivery
-remains outstanding.
+`reader.next_chunks(absolute_deadline, sink)` is opt-in, never a fallback from
+whole delivery. The sink accepts `ChunkEvent::Begin`, `Chunk` and `Abort` and
+returns `Result<(), E>`. `ChunkOutcome::End` is returned separately and is the
+**only commit point**; no callback follows commit. Empty/terminal input returns
+None; framing tails use ChunkOutcome::Tail (or NoCompletePacket before any
+completed transfer). These reports are distinct from PacketInfo and cannot feed
+complete-packet Inspection counters. Mark an unfiltered inventory incomplete or
+keep explicitly separate scopes when mixing modes.
 
-- **Begin** follows primary structural validation and explicit admission. Carry
-  packet identity/absolute offset, declared frame and DATA ranges, edition/limits,
-  recovery and authorization evidence. It is a provisional record, not the
-  complete-only PacketInfo exposed by PacketBuf today.
-- **Chunk** carries identity, frame-relative range and received bytes; distinguish
-  frame bytes from DATA intersections so secondary/filler/trailer are never
-  silently decoded as DATA. Ranges are monotone, non-overlapping and byte-exact.
-  A fixed, budgeted reusable quantum bounds live storage; borrowed bytes are valid
-  only for the callback/lease lifetime. Asynchronous retention requires moving an
-  accounted owner from a bounded pool, not an unbounded copy queue.
-- **End** commits only after all declared bytes arrive and source-stability and
-  structural checks complete. Carry final byte counts and integrity/admission
-  evidence, including Unconfirmed(ExactEof) where applicable. It does not assert
-  payload validity or upgrade packet-data checksum contents from NotChecked.
-- **Abort** on truncation, source mutation, cancellation, deadline or operational
-  error preserves received-byte/offset/recovery evidence and invalidates all
-  provisional chunks. No complete Packet or successful End is emitted. Consumers
-  must stage/rollback output or label it provisional; core cannot retract an
-  irreversible decoder side effect. Interrupted retries preserve progress;
-  WouldBlock remains terminal unless a future resumable API is separately agreed.
-- **Rejected/Drained** reports policy reason, requested and actually consumed
-  bytes, EOF/error/cancellation and disposition. It is an explicit omission, not a
-  complete-packet inventory observation. A failed drain does not authorize sync
-  recovery inside the refused body or pretend that a following frame was found.
+Begin follows a checked primary and H/edition soft authorization. NextHeader,
+Unconfirmed(ExactEof), explicit StreamOptIn and legacy evidence retain their
+whole-mode meanings. Whole-frame B/isize storage feasibility is unnecessary in
+this fixed-memory mode, including after a positioned whole BudgetTooSmall or
+32-bit TargetLimit refusal. H and absolute-offset overflow still refuse before
+Begin and retain the header; explicit drain can omit such a frame instead.
+There is no fallback from a failed probe to stream trust. Known-stable-short
+input keeps the approved truncation-only path: fixed drain, tail, **no Begin**.
 
-Recovery scans precede Begin; garbage is never a payload chunk. No implicit
-fallback from a failed seek probe to stream trust is permitted. All retained
-chunks/leases and workspace remain budgeted; impossible requests fail rather than
-wait, temporary pressure observes cancellation/deadlines. Output/context credits
-must not form a cycle with input credits. The existing whole-packet API and 0.1
-capture semantics remain unchanged.
+Each PacketChunk borrows at most **4,096 bytes** for this callback only. The
+primary is the first 24-byte chunk. Frame-relative ranges partition the received
+frame exactly; `data_range`/`data` contain only their DATA intersection, excluding
+secondary/filler/trailer. Recovery precedes Begin and never becomes payload.
+The fixed scratch plus 1,024 bytes of bounded transfer/control metadata are
+charged at reader construction, alongside existing read-ahead. There are no
+packet blocks, assembly leases, credit waits or per-transfer allocations. The
+callback and source own their own bounded state outside B; async retention would
+need a separately bounded accounted copy, never a retained callback borrow.
 
-Future executable chunk coverage must pin byte/range continuity, no commit
-on every abort class, explicit disposition and early-stop accounting, source
-mutation, bounded chunk retention, deadlines and merger backpressure. These are
-outstanding implementation/qualification obligations, not passing checks here.
+End means all declared bytes arrived and were acknowledged by callbacks, with
+final source/cancellation/deadline checks. It carries final ranges, secondary
+integrity and admission evidence. Q7 checksums verify incrementally as chunks
+arrive (default ON; opt-out NotChecked; absent Absent). A mismatch is final
+integrity evidence, not automatic refusal. End does not claim payload validity,
+produce PacketInfo or advance the complete-packet inventory. Consumers may apply
+staged setup/time state only after End and their own semantic validation.
+
+Any failure after an attempted Begin attempts Abort and returns ChunkError.
+Truncation, I/O (including WouldBlock), mutation, cancellation, deadline and sink
+rejection invalidate **all** provisional output; no End exists. Before the first
+completed transfer truncation retains typed NoCompletePacket; after establishment
+it is ChunkFailure::Truncated. Received progress includes primary and actual
+logical reads, offered progress includes a rejected chunk, and delivered progress
+counts successful callback acknowledgements, not semantic consumption. A read
+error can leave received > offered. All counts exclude recovery. Original sink E
+is preserved even if Abort notification fails (abort_sink_error). Begin rejection
+also attempts Abort with zero offered bytes. Panics propagate with the reader
+terminal; Rust unwinding cannot guarantee an Abort callback.
+
+Stage/rollback output or visibly label it provisional: core cannot undo external
+side effects. Cancellation/deadlines are checked around recovery, reads,
+Interrupted retries and callbacks; they cannot preempt a blocking Read/Seek or
+callback. Operational errors are terminal; only pre-Begin positioned size
+refusals are resumable. No body rescan follows abort. Output/context ownership
+must never depend on returning input credits; the callback API itself holds no
+packet-credit lease. Whole delivery, coalescing, drain and 0.1 capture semantics
+remain unchanged. See [chunk verification](verification-v02-chunks.md).
 
 
 Q8 positioned refusal detail: `refused_header()` borrows the checked primary.
 `position()` stays at frame offset + 24; body bytes are not logically consumed.
 Fixed read-ahead may already hold payload bytes. Retrying whole delivery retries
-the SAME frame and recovery evidence, never skips it. Only H/B/target size errors
+the SAME frame and recovery evidence, never skips it. A log-and-continue
+error loop will spin on that refusal unless it explicitly calls drain_next or
+stops (or selects an authorized explicit chunk transfer). Only H/B/target size errors
 are nonterminal; Uncorroborated, allocation, cancellation/deadline, source/I/O and
 structural failures remain terminal. into_inner discards cached header/read-ahead;
 stopping does not rewind the underlying transport. The cache is one fixed
