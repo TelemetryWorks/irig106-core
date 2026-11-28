@@ -73,7 +73,12 @@ fn ranges_bytes_checksums_and_commit_are_exact() {
     support::watchdog(Duration::from_secs(10), || {
         for width in [0, 1, 2, 4] {
             for secondary in [false, true] {
-                let (bytes, sum) = fixture(2 * 4096 + 44, width, secondary);
+                let (mut bytes, sum) = fixture(2 * 4096 + 44, width, secondary);
+                if secondary {
+                    // Independent literal: byte sum 106, word sum 0x2644,
+                    // reserved 0x1234, stored byte checksum 106.
+                    bytes[24..36].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8, 0x34, 0x12, 106, 0]);
+                }
                 let pool = BlockPool::with_defaults().unwrap();
                 let mut r = WholePacketReader::stream(
                     Short {
@@ -96,6 +101,7 @@ fn ranges_bytes_checksums_and_commit_are_exact() {
                                 assert_eq!(start.chunk_bytes, CHUNK_BYTES);
                                 assert_eq!(start.offset, 0);
                                 assert_eq!(start.hard_limit, DEFAULT_HARD_LIMIT);
+                                assert_eq!(start.budget_bytes, DEFAULT_POOL_BUDGET);
                             }
                             ChunkEvent::Chunk(part) => {
                                 assert_eq!(part.range.start, staged.len() as u64);
@@ -126,6 +132,15 @@ fn ranges_bytes_checksums_and_commit_are_exact() {
                     panic!("end")
                 };
                 assert_eq!((begins, aborts), (1, 0));
+                assert_eq!(
+                    end.secondary_integrity
+                        .map(|v| (v.stored, v.byte_sum, v.word_sum, v.reserved)),
+                    if secondary {
+                        Some((106, 106, 0x2644, 0x1234))
+                    } else {
+                        None
+                    }
+                );
                 assert_eq!(staged, bytes);
                 assert_eq!(
                     data,
@@ -695,4 +710,147 @@ fn begin_rejection_and_header_only_final_source_check_fail_closed() {
         })
         .unwrap_err();
     assert_eq!(e.abort.unwrap().kind, ChunkAbortKind::SourceChanged);
+}
+
+#[test]
+fn source_mutation_after_first_chunk_quantum_aborts_before_reading_remainder() {
+    support::watchdog(Duration::from_secs(5), || {
+        struct Mutating {
+            input: Cursor<Vec<u8>>,
+            reads: Arc<AtomicU64>,
+        }
+        impl Read for Mutating {
+            fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+                self.reads.fetch_add(1, Ordering::Relaxed);
+                self.input.read(out)
+            }
+        }
+        impl Seek for Mutating {
+            fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+                self.input.seek(pos)
+            }
+        }
+        impl StableSource for Mutating {
+            fn source_stamp(&mut self) -> io::Result<SourceStamp> {
+                Ok(SourceStamp::new(
+                    self.input.get_ref().len() as u64,
+                    1,
+                    u128::from(self.input.position() >= (24 + CHUNK_BYTES) as u64),
+                ))
+            }
+        }
+        let requested = 24 + 3 * CHUNK_BYTES;
+        let (bytes, _) = fixture(requested, 0, false);
+        let reads = Arc::new(AtomicU64::new(0));
+        let mut reader = WholePacketReader::seek_checked(
+            Mutating {
+                input: Cursor::new(bytes),
+                reads: reads.clone(),
+            },
+            WholePolicy::new().with_read_ahead_bytes(24),
+            BlockPool::with_defaults().unwrap(),
+        )
+        .unwrap();
+        let mut events = Vec::new();
+        let error = reader
+            .next_chunks(deadline(), |event| {
+                match event {
+                    ChunkEvent::Begin(_) => events.push("begin"),
+                    ChunkEvent::Chunk(c) => {
+                        assert_eq!(c.range, 0..24); // Mutated body quantum is never offered.
+                        events.push("primary");
+                    }
+                    ChunkEvent::Abort(a) => {
+                        assert_eq!(a.received_bytes, (24 + CHUNK_BYTES) as u64);
+                        events.push("abort");
+                    }
+                    _ => panic!("unexpected chunk event"),
+                }
+                Ok::<(), io::Error>(())
+            })
+            .unwrap_err();
+        assert!(matches!(error.failure, ChunkFailure::Core {
+            error: Error { reason: ErrorKind::Admission { source: AdmissionError::SourceChanged, .. }, position, .. }, ..
+        } if position == (24 + CHUNK_BYTES) as u64));
+        let abort = error.abort.unwrap();
+        assert_eq!(abort.kind, ChunkAbortKind::SourceChanged);
+        assert_eq!(abort.requested_bytes, requested as u64);
+        assert_eq!(abort.received_bytes, (24 + CHUNK_BYTES) as u64);
+        assert!(abort.received_bytes < abort.requested_bytes);
+        assert_eq!(
+            (
+                abort.offered_bytes,
+                abort.delivered_bytes,
+                abort.delivered_data_bytes
+            ),
+            (24, 24, 0)
+        );
+        assert_eq!(events, ["begin", "primary", "abort"]);
+        assert_eq!(reads.load(Ordering::Relaxed), 2); // Primary + first body quantum only.
+        assert!(
+            reader
+                .next_chunks(deadline(), |_| Ok::<(), io::Error>(()))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(reads.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            reader.into_inner().input.position(),
+            (24 + CHUNK_BYTES) as u64
+        );
+    });
+}
+
+#[test]
+fn chunk_hard_limit_accepts_exact_h_and_positions_h_plus_four() {
+    support::watchdog(Duration::from_secs(5), || {
+        const H: u32 = 48;
+        for p in [H, H + 4] {
+            let (bytes, _) = fixture(p as usize, 0, false);
+            let pool = BlockPool::new(4 * 1024 * 1024).unwrap();
+            let budget = pool.stats().unwrap().budget_bytes;
+            let mut reader = WholePacketReader::stream(
+                Cursor::new(bytes),
+                WholePolicy::new()
+                    .with_hard_limit(H)
+                    .with_read_ahead_bytes(24),
+                pool.clone(),
+            )
+            .unwrap();
+            let mut begins = 0;
+            let result = reader.next_chunks(deadline(), |event| {
+                match event {
+                    ChunkEvent::Begin(start) => {
+                        begins += 1;
+                        assert_eq!(start.hard_limit, H);
+                        assert_eq!(start.budget_bytes, budget); // Pins caller override too.
+                    }
+                    ChunkEvent::Abort(_) => panic!("neither case aborts after Begin"),
+                    _ => {}
+                }
+                Ok::<(), io::Error>(())
+            });
+            if p == H {
+                let Some(ChunkOutcome::End(end)) = result.unwrap() else {
+                    panic!("exact H must commit")
+                };
+                assert_eq!(end.frame_bytes, u64::from(H));
+                assert_eq!(begins, 1);
+                assert!(reader.refused_header().is_none());
+            } else {
+                let error = result.unwrap_err();
+                assert!(matches!(error.failure, ChunkFailure::Core {
+                    error: Error { reason: ErrorKind::Admission {
+                        source: AdmissionError::HardLimit { length, limit, .. }, ..
+                    }, position: 24, .. }, ..
+                } if length == H + 4 && limit == H));
+                assert!(error.abort.is_none());
+                assert_eq!(begins, 0);
+                assert_eq!(reader.position(), 24);
+                assert_eq!(reader.refused_header().unwrap().packet_length(), H + 4);
+                assert_eq!(reader.into_inner().position(), 24); // No implicit drain/body read.
+            }
+            assert_eq!(pool.stats().unwrap().allocated_blocks, 0);
+        }
+    });
 }

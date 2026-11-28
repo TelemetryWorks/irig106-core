@@ -82,3 +82,13 @@ failure nonterminal, and corrupt chunk offsets. Each fails an assertion/runtime
 test; all controls are discarded. A header-only mutation fixture isolates the
 final source check rather than claiming redundant checks are individually killed.
 No unsafe library code, new dependency, tag or publication is introduced.
+
+## Independent-review delta (2026-11-28)
+
+C16/C21/C10/C24 each survived the original chunk suite, then failed the added
+assertions: literal secondary stored/byte/word/reserved evidence (and None without
+a secondary), mutation after the first 4 KiB body read with exact aborted progress
+and no further reads, P == H acceptance / H+4 positioned refusal, and Begin budget
+including a caller override. All temporary mutants were restored; no production
+code changed. The 12 MiB memory gate runs on Linux/macOS/Windows **64-bit**;
+i686 runs functional tests, including the huge-short-claim case, not a memory gate.

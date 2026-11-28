@@ -158,7 +158,9 @@ remain unchanged. See [chunk verification](verification-v02-chunks.md).
 Q8 positioned refusal detail: `refused_header()` borrows the checked primary.
 `position()` stays at frame offset + 24; body bytes are not logically consumed.
 Fixed read-ahead may already hold payload bytes. Retrying whole delivery retries
-the SAME frame and recovery evidence, never skips it. Only H/B/target size errors
+the SAME frame and recovery evidence, never skips it. A log-and-continue
+error loop will spin on that refusal unless it explicitly calls drain_next or
+stops (or selects an authorized explicit chunk transfer). Only H/B/target size errors
 are nonterminal; Uncorroborated, allocation, cancellation/deadline, source/I/O and
 structural failures remain terminal. into_inner discards cached header/read-ahead;
 stopping does not rewind the underlying transport. The cache is one fixed
