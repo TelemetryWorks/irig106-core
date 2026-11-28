@@ -6,7 +6,7 @@ from check_whole_resources import CASES, MemoryCeilingExceeded, validate
 class WholeResources(unittest.TestCase):
     def test_reviewer_ceiling_policy_and_boundaries(self):
         sample = dict(phase="cold", pid="1", budget="16777216", used="100", blocks="0", idle="0")
-        for case in ["bogus", "refuse", "pressure-baseline", "recovery", "drain"]:
+        for case in ["bogus", "refuse", "pressure-baseline", "recovery", "drain", "chunk"]:
             with self.subTest(case=case):
                 self.assertEqual(CASES[case], 12)
                 validate(sample, 12288, CASES[case] * 1024)
@@ -42,11 +42,12 @@ class WholeResources(unittest.TestCase):
         with self.assertRaises(AssertionError):
             validate(sample | dict(blocks="2", used="1200000"), 3000, 12288)
 
-    def test_drain_uses_zero_blocks_then_resumes_with_one(self):
+    def test_drain_and_chunk_use_zero_blocks_then_resume_with_one(self):
         sample = dict(phase="drained", pid="1", budget="268435456", used="100000", blocks="0", idle="0")
-        validate(sample, 3000, 12288)
-        with self.assertRaises(AssertionError):
-            validate(sample | dict(blocks="1", used="600000"), 3000, 12288)
+        for phase in ["drained", "chunked"]:
+            validate(sample | dict(phase=phase), 3000, 12288)
+            with self.assertRaises(AssertionError):
+                validate(sample | dict(phase=phase, blocks="1", used="600000"), 3000, 12288)
         validate(sample | dict(phase="resumed", blocks="1", used="600000"), 3000, 12288)
         with self.assertRaises(AssertionError):
             validate(sample | dict(phase="resumed"), 3000, 12288)

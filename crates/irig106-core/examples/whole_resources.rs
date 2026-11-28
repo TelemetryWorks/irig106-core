@@ -109,6 +109,8 @@ fn main() -> Result<(), Box<dyn StdError>> {
     let pool = BlockPool::new(
         if matches!(case.as_str(), "pressure" | "pressure-baseline") {
             16 * MIB
+        } else if case == "chunk" {
+            4 * MIB
         } else if case == "coalesce" {
             272 * MIB
         } else {
@@ -116,7 +118,54 @@ fn main() -> Result<(), Box<dyn StdError>> {
         },
     )?;
     let mut buf = PacketBuf::new(pool.clone())?;
-    if case == "drain" {
+    if case == "chunk" {
+        let p = 64 * MIB as u32;
+        let source = Synthetic {
+            p,
+            count: 1,
+            kind: 9,
+            next: Some(true),
+            pos: 0,
+        };
+        let mut reader = WholePacketReader::stream(
+            source,
+            WholePolicy::new().with_stream_opt_in(true),
+            pool.clone(),
+        )?;
+        checkpoint("cold", &pool)?;
+        assert!(matches!(
+            reader.next_packet_into(&mut buf, deadline()),
+            Err(Error {
+                reason: ErrorKind::Pool {
+                    source: PoolError::BudgetTooSmall { .. },
+                    ..
+                },
+                ..
+            })
+        ));
+        let mut at = 0u64;
+        let outcome = reader.next_chunks(deadline(), |e| {
+            if let ChunkEvent::Chunk(c) = e {
+                assert_eq!(c.range.start, at);
+                assert!(c.bytes.len() <= CHUNK_BYTES);
+                assert!(c.data.iter().all(|&b| b == 0x5a));
+                at = c.range.end;
+            }
+            Ok::<(), io::Error>(())
+        })?;
+        let Some(ChunkOutcome::End(end)) = outcome else {
+            panic!("chunk end")
+        };
+        assert_eq!(
+            (at, end.frame_bytes, end.data_bytes),
+            (u64::from(p), u64::from(p), u64::from(p) - 24)
+        );
+        assert_eq!(pool.stats()?.allocated_blocks, 0);
+        checkpoint("chunked", &pool)?;
+        reader.next_packet_into(&mut buf, deadline())?;
+        assert_eq!(buf.info().unwrap().offset, u64::from(p));
+        checkpoint("resumed", &pool)?;
+    } else if case == "drain" {
         let p = 64 * MIB as u32;
         let source = Synthetic {
             p,

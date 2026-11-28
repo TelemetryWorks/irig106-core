@@ -55,6 +55,8 @@ pub use admission::{
     WholePolicy,
 };
 pub use whole::{
-    CoalescedPacket, CoalescingEvidence, DrainDisposition, DrainError, DrainEvent, DrainReason,
-    DrainReport, PacketBuf, PacketInfo, WholeEvent, WholePacketReader,
+    CHUNK_BYTES, ChunkAbort, ChunkAbortKind, ChunkEnd, ChunkError, ChunkEvent, ChunkFailure,
+    ChunkOutcome, ChunkStart, CoalescedPacket, CoalescingEvidence, DrainDisposition, DrainError,
+    DrainEvent, DrainReason, DrainReport, PacketBuf, PacketChunk, PacketInfo, WholeEvent,
+    WholePacketReader,
 };

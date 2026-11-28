@@ -11,6 +11,11 @@ use std::{
     mem,
     time::Instant,
 };
+mod chunks;
+pub use chunks::{
+    CHUNK_BYTES, ChunkAbort, ChunkAbortKind, ChunkEnd, ChunkError, ChunkEvent, ChunkFailure,
+    ChunkOutcome, ChunkStart, PacketChunk,
+};
 mod drain;
 pub use drain::{DrainDisposition, DrainError, DrainEvent, DrainReason, DrainReport};
 const QUANTUM: usize = 4096;
@@ -280,7 +285,7 @@ impl<R: Read> WholePacketReader<R> {
         }
         let bytes = policy
             .read_ahead
-            .checked_add(mem::size_of::<Self>() + QUANTUM + 512)
+            .checked_add(mem::size_of::<Self>() + QUANTUM + 512 + chunks::METADATA_BYTES)
             .ok_or(Error {
                 reason: ErrorKind::Pool {
                     source: PoolError::InvalidRequest,
@@ -370,28 +375,29 @@ impl<R: Read> WholePacketReader<R> {
         if !matches!(result, Ok(Some(WholeEvent::Packet))) {
             buf.clear();
         }
-        result.map_err(|reason| {
-            let positioned = self.refused.is_some()
-                && matches!(
-                    &reason,
-                    ErrorKind::Admission {
-                        source: AdmissionError::HardLimit { .. } | AdmissionError::TargetLimit,
-                        ..
-                    } | ErrorKind::Pool {
-                        source: PoolError::BudgetTooSmall { .. },
-                        ..
-                    }
-                );
-            self.framing.done = !positioned;
-            if !positioned {
-                self.refused = None;
-            }
-            Error {
-                reason,
-                position: self.framing.position,
-                recovery: self.framing.recovery,
-            }
-        })
+        result.map_err(|reason| self.finish_error(reason))
+    }
+    fn finish_error(&mut self, reason: ErrorKind) -> Error {
+        let positioned = self.refused.is_some()
+            && matches!(
+                &reason,
+                ErrorKind::Admission {
+                    source: AdmissionError::HardLimit { .. } | AdmissionError::TargetLimit,
+                    ..
+                } | ErrorKind::Pool {
+                    source: PoolError::BudgetTooSmall { .. },
+                    ..
+                }
+            );
+        self.framing.done = !positioned;
+        if !positioned {
+            self.refused = None;
+        }
+        Error {
+            reason,
+            position: self.framing.position,
+            recovery: self.framing.recovery,
+        }
     }
     fn tail(&mut self, offset: u64) -> Result<Option<WholeEvent>, ErrorKind> {
         self.framing
