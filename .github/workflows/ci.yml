@@ -203,3 +203,5 @@ jobs:
           toolchain: stable
           targets: i686-pc-windows-msvc
       - run: cargo test --workspace --locked --target i686-pc-windows-msvc
+      - name: Positioned target-limit refusal then fixed-memory drain (synthetic 4 GiB)
+        run: cargo test -p irig106-core --test drain --locked --target i686-pc-windows-msvc target_refusal_then_full_drain_then_next_packet -- --ignored --exact

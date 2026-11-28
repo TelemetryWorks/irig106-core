@@ -403,7 +403,9 @@ DrainEvent::Tail. No PacketInfo, successful chunk End or inventory observation.
 This explicit call consumes a declared remainder even above H/B/target whole
 limits, using fixed charged scratch with no packet credits or assembly wait.
 It does not corroborate or authorize whole delivery; contents stay unverified.
-Normal next_packet_into never falls back or resumes after a refusal. Interrupted
+Normal next_packet_into never falls back. Owner Q8 (2026-11-28) makes only
+H/B/target size refusals positioned and nonterminal; drain_next then consumes
+that same cached header/body, or the caller may stop. Interrupted
 retries preserve progress; deadlines/cancellation are cooperative including
 recovery. Source mutation, I/O error, deadline, cancellation and truncation are
 terminal. No body rescan or silent prefix. A complete omission establishes framing
@@ -428,3 +430,13 @@ into absent/not_checked/verified/mismatch; capture and opt-out report coverage
 explicitly. Counters commit atomically with existing inventory state. Example
 summaries append `data_checksums=...`; they retain counts after errors and keep
 their existing exit policy. See [scope and cost evidence](verification-v02-data-checksum.md).
+
+
+Q8 positioned refusal detail: `refused_header()` borrows the checked primary.
+`position()` stays at frame offset + 24; body bytes are not logically consumed.
+Fixed read-ahead may already hold payload bytes. Retrying whole delivery retries
+the SAME frame and recovery evidence, never skips it. Only H/B/target size errors
+are nonterminal; Uncorroborated, allocation, cancellation/deadline, source/I/O and
+structural failures remain terminal. into_inner discards cached header/read-ahead;
+stopping does not rewind the underlying transport. The cache is one fixed
+metadata record charged through reader size at construction, never a body buffer.

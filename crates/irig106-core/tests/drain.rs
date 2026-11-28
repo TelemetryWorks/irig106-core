@@ -43,22 +43,19 @@ fn opt_in_hard_refusal_and_pending_read_ahead_resume_exactly() {
         let bytes = [first, frame(28)].concat();
         let pool = BlockPool::with_defaults().unwrap();
         let policy = WholePolicy::new().with_hard_limit(32);
-        let mut normal =
-            WholePacketReader::stream(Cursor::new(bytes.clone()), policy, pool.clone()).unwrap();
+        let mut r = WholePacketReader::stream(Cursor::new(bytes), policy, pool.clone()).unwrap();
         let mut buf = PacketBuf::new(pool.clone()).unwrap();
         assert!(matches!(
-            normal.next_packet_into(&mut buf, deadline()),
-            Err(Error {
-                reason: ErrorKind::Admission {
-                    source: AdmissionError::HardLimit { .. },
-                    ..
-                },
+            r.next_packet_into(&mut buf, deadline()).unwrap_err().reason,
+            ErrorKind::Admission {
+                source: AdmissionError::HardLimit { .. },
                 ..
-            })
+            }
         ));
-        assert!(normal.drain_next(deadline()).unwrap().is_none()); // No automatic fallback/resume after refusal.
-        let mut r = WholePacketReader::stream(Cursor::new(bytes), policy, pool.clone()).unwrap();
+        assert_eq!(r.position(), 24);
+        assert_eq!(r.refused_header().unwrap().packet_length(), 68);
         let d = report(r.drain_next(deadline()).unwrap());
+        assert!(r.refused_header().is_none());
         assert!(matches!(
             d.reason,
             DrainReason::HardLimit {
@@ -337,7 +334,30 @@ fn huge_claim_on_short_input_uses_u64_progress_on_32_bit_too() {
         pool.clone(),
     )
     .unwrap();
+    let e = r
+        .next_packet_into(&mut PacketBuf::new(pool.clone()).unwrap(), deadline())
+        .unwrap_err();
+    assert!(if cfg!(target_pointer_width = "32") {
+        matches!(
+            e.reason,
+            ErrorKind::Admission {
+                source: AdmissionError::TargetLimit,
+                ..
+            }
+        )
+    } else {
+        matches!(
+            e.reason,
+            ErrorKind::Pool {
+                source: PoolError::BudgetTooSmall { .. },
+                ..
+            }
+        )
+    });
+    assert_eq!(r.position(), 24);
+    assert_eq!(r.refused_header().unwrap().packet_length(), 0xffff_fffc);
     let d = report(r.drain_next(deadline()).unwrap());
+    assert!(r.refused_header().is_none());
     assert_eq!(
         (d.requested_bytes, d.consumed_bytes, d.disposition),
         (0xffff_fffc, 28, DrainDisposition::Truncated)
@@ -404,4 +424,238 @@ fn source_mutation_after_first_quantum_aborts_before_reading_remainder() {
         assert_eq!(e.error.position, d.offset + d.consumed_bytes);
         assert!(r.drain_next(deadline()).unwrap().is_none());
     });
+}
+
+#[test]
+fn live_size_refusal_then_explicit_drain_then_next_packet() {
+    support::watchdog(Duration::from_secs(5), || {
+        for (p, hard, budget) in [
+            (68, 32, DEFAULT_POOL_BUDGET),
+            (
+                2 * BLOCK_BYTES + 28,
+                DEFAULT_HARD_LIMIT,
+                BLOCK_BYTES + 131072,
+            ),
+        ] {
+            let input = [frame(p), frame(28)].concat();
+            let pool = BlockPool::new(budget).unwrap();
+            let mut r = WholePacketReader::stream(
+                Cursor::new(input),
+                WholePolicy::new()
+                    .with_hard_limit(hard)
+                    .with_read_ahead_bytes(24),
+                pool.clone(),
+            )
+            .unwrap();
+            let mut buf = PacketBuf::new(pool.clone()).unwrap();
+            let first = r.next_packet_into(&mut buf, deadline()).unwrap_err();
+            assert!(matches!(
+                first.reason,
+                ErrorKind::Admission {
+                    source: AdmissionError::HardLimit { .. },
+                    ..
+                } | ErrorKind::Pool {
+                    source: PoolError::BudgetTooSmall { .. },
+                    ..
+                }
+            ));
+            assert_eq!(r.position(), 24);
+            assert!(buf.info().is_none());
+            assert_eq!(pool.stats().unwrap().allocated_blocks, 0);
+            let repeated = r.next_packet_into(&mut buf, deadline()).unwrap_err();
+            assert_eq!(repeated.position, 24); // Same header, never automatic skip.
+            let d = report(r.drain_next(deadline()).unwrap());
+            assert_eq!(
+                (d.offset, d.consumed_bytes, d.disposition),
+                (0, p as u64, DrainDisposition::Drained)
+            );
+            assert_eq!(pool.stats().unwrap().allocated_blocks, 0);
+            assert!(matches!(
+                r.next_packet_into(&mut buf, deadline()).unwrap(),
+                Some(WholeEvent::Packet)
+            ));
+            assert_eq!(buf.info().unwrap().offset, p as u64);
+        }
+    });
+}
+#[test]
+fn refusal_then_stop_leaves_live_body_unread() {
+    struct Live {
+        bytes: Cursor<Vec<u8>>,
+    }
+    impl Read for Live {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            self.bytes.read(out)
+        }
+    }
+    let pool = BlockPool::with_defaults().unwrap();
+    let mut r = WholePacketReader::stream(
+        Live {
+            bytes: Cursor::new([frame(68), frame(28)].concat()),
+        },
+        WholePolicy::new()
+            .with_hard_limit(32)
+            .with_read_ahead_bytes(24),
+        pool.clone(),
+    )
+    .unwrap();
+    let mut buf = PacketBuf::new(pool.clone()).unwrap();
+    r.next_packet_into(&mut buf, deadline()).unwrap_err();
+    assert_eq!(r.position(), 24);
+    assert_eq!(pool.stats().unwrap().allocated_blocks, 0);
+    assert_eq!(r.into_inner().bytes.position(), 24); // No body consumption or automatic drain.
+}
+
+#[test]
+fn positioned_recovery_survives_retry_and_expired_explicit_drain() {
+    let pool = BlockPool::with_defaults().unwrap();
+    let input = [vec![0xff; 7], frame(68), frame(28)].concat();
+    let mut r = WholePacketReader::stream(
+        Cursor::new(input),
+        WholePolicy::new().with_hard_limit(32),
+        pool.clone(),
+    )
+    .unwrap();
+    let mut buf = PacketBuf::new(pool).unwrap();
+    for _ in 0..2 {
+        let e = r.next_packet_into(&mut buf, deadline()).unwrap_err();
+        assert_eq!(e.position, 31);
+        assert_eq!(e.recovery.unwrap().scanned_bytes, 7);
+        assert!(r.refused_header().is_some());
+    }
+    let e = r.drain_next(Instant::now()).unwrap_err();
+    assert_eq!(e.error.recovery.unwrap().scanned_bytes, 7);
+    let d = e.report.unwrap();
+    assert_eq!(
+        (
+            d.offset,
+            d.consumed_bytes,
+            d.recovery.unwrap().scanned_bytes
+        ),
+        (7, 24, 7)
+    );
+    assert!(r.refused_header().is_none());
+    assert!(r.next_packet_into(&mut buf, deadline()).unwrap().is_none());
+}
+#[cfg(target_pointer_width = "32")]
+#[test]
+#[ignore = "4 GiB synthetic drain; explicitly executed only in 32-bit GitHub CI"]
+fn target_refusal_then_full_drain_then_next_packet() {
+    support::watchdog(Duration::from_secs(90), || {
+        struct Large {
+            pos: u64,
+            first: [u8; 24],
+            next: [u8; 24],
+        }
+        const P: u64 = 0xffff_fffc;
+        impl Read for Large {
+            fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+                if self.pos >= P + 28 {
+                    return Ok(0);
+                }
+                let (relative, end, header) = if self.pos < P {
+                    (self.pos, P, &self.first)
+                } else {
+                    (self.pos - P, 28, &self.next)
+                };
+                let n = out.len().min(
+                    (if relative < 24 {
+                        24 - relative
+                    } else {
+                        end - relative
+                    }) as usize,
+                );
+                if relative < 24 {
+                    out[..n].copy_from_slice(&header[relative as usize..relative as usize + n]);
+                } else {
+                    out[..n].fill(0);
+                }
+                self.pos += n as u64;
+                Ok(n)
+            }
+        }
+        let next: [u8; 24] = frame(28)[..24].try_into().unwrap();
+        let mut first = next;
+        first[4..8].copy_from_slice(&(P as u32).to_le_bytes());
+        let sum: u32 = first[..22]
+            .chunks_exact(2)
+            .map(|w| u16::from_le_bytes([w[0], w[1]]) as u32)
+            .sum();
+        first[22..24].copy_from_slice(&(sum as u16).to_le_bytes());
+        let pool = BlockPool::new(BLOCK_BYTES + 131072).unwrap();
+        let mut r = WholePacketReader::stream(
+            Large {
+                pos: 0,
+                first,
+                next,
+            },
+            WholePolicy::new()
+                .with_hard_limit(u32::MAX)
+                .with_read_ahead_bytes(24),
+            pool.clone(),
+        )
+        .unwrap();
+        let mut buf = PacketBuf::new(pool.clone()).unwrap();
+        assert!(matches!(
+            r.next_packet_into(&mut buf, deadline()).unwrap_err().reason,
+            ErrorKind::Admission {
+                source: AdmissionError::TargetLimit,
+                ..
+            }
+        ));
+        let d = report(
+            r.drain_next(Instant::now() + Duration::from_secs(60))
+                .unwrap(),
+        );
+        assert_eq!(
+            (d.reason, d.consumed_bytes, d.disposition),
+            (DrainReason::TargetLimit, P, DrainDisposition::Drained)
+        );
+        assert_eq!(pool.stats().unwrap().allocated_blocks, 0);
+        r.next_packet_into(&mut buf, deadline()).unwrap();
+        assert_eq!(buf.info().unwrap().offset, P);
+    });
+}
+
+#[test]
+fn other_errors_remain_terminal_even_with_a_cached_size_refusal() {
+    let pool = BlockPool::with_defaults().unwrap();
+    let mut r = WholePacketReader::stream(
+        Cursor::new(frame(68)),
+        WholePolicy::new().with_hard_limit(32),
+        pool.clone(),
+    )
+    .unwrap();
+    r.next_packet_into(&mut PacketBuf::new(pool).unwrap(), deadline())
+        .unwrap_err();
+    assert!(r.refused_header().is_some());
+    let mut wrong = PacketBuf::new(BlockPool::with_defaults().unwrap()).unwrap();
+    assert!(matches!(
+        r.next_packet_into(&mut wrong, deadline())
+            .unwrap_err()
+            .reason,
+        ErrorKind::Pool {
+            source: PoolError::InvalidRequest,
+            ..
+        }
+    ));
+    assert!(r.refused_header().is_none());
+    assert!(r.drain_next(deadline()).unwrap().is_none());
+    let pool = BlockPool::with_defaults().unwrap();
+    let mut r = WholePacketReader::stream(
+        Cursor::new(frame(BLOCK_BYTES + 4)),
+        WholePolicy::new(),
+        pool.clone(),
+    )
+    .unwrap();
+    let mut buf = PacketBuf::new(pool).unwrap();
+    assert!(matches!(
+        r.next_packet_into(&mut buf, deadline()).unwrap_err().reason,
+        ErrorKind::Admission {
+            source: AdmissionError::Uncorroborated,
+            ..
+        }
+    ));
+    assert!(r.refused_header().is_none());
+    assert!(r.drain_next(deadline()).unwrap().is_none());
 }

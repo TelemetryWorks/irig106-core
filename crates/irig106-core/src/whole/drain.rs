@@ -119,7 +119,7 @@ impl<R: Read> WholePacketReader<R> {
     /// Explicitly discard the next structurally framed packet, even above H/B.
     /// No packet storage, assembly lease, admission authorization or automatic
     /// fallback. Uses the existing charged fixed 4 KiB scratch; no credit waits.
-    /// Calling after a terminal whole-reader refusal cannot resume that reader.
+    /// After an H/B/target refusal, consumes that cached frame; never auto-drains.
     /// Drained bytes establish framing only, not inventory completeness: callers
     /// must record the omission and stop/mark incomplete unfiltered inspection.
     /// Checks before/after bounded reads and Interrupted retries enforce deadline
@@ -135,7 +135,7 @@ impl<R: Read> WholePacketReader<R> {
         if self.framing.done {
             return Ok(None);
         }
-        self.framing.recovery = None;
+        self.framing.recovery = self.refused.as_ref().and_then(|p| p.recovery);
         let pool = self.pool.clone();
         let mut check = || -> Result<(), ErrorKind> {
             pool.live()?;
@@ -144,36 +144,43 @@ impl<R: Read> WholePacketReader<R> {
             }
             Ok(())
         };
-        let mut report = None;
+        let mut report = self.refused.as_ref().map(|p| DrainReport {
+            offset: p.offset,
+            header: p.header,
+            ranges: p.ranges.clone(),
+            reason: DrainReason::CallerRequested,
+            requested_bytes: u64::from(p.header.packet_length()),
+            consumed_bytes: 24,
+            disposition: DrainDisposition::Aborted,
+            recovery: p.recovery,
+        });
         let result = (|| -> Result<Option<DrainEvent>, ErrorKind> {
             check()?;
-            let limit = if self.previous_large { 24 } else { usize::MAX };
-            let (offset, header, ranges) =
-                match self.framing.find_header_checked(limit, &mut check)? {
-                    FrameStart::Header {
-                        offset,
-                        header,
-                        ranges,
-                    } => (offset, header, ranges),
-                    FrameStart::End(event) => {
-                        return Ok(event.map(|e| match e {
-                            Event::Tail {
+            let (offset, header, ranges) = match self.next_header_checked(&mut check)? {
+                FrameStart::Header {
+                    offset,
+                    header,
+                    ranges,
+                } => (offset, header, ranges),
+                FrameStart::End(event) => {
+                    return Ok(event.map(|e| match e {
+                        Event::Tail {
+                            offset,
+                            bytes,
+                            kind,
+                            recovery,
+                        } => DrainEvent::Tail {
+                            tail: Tail {
                                 offset,
                                 bytes,
                                 kind,
-                                recovery,
-                            } => DrainEvent::Tail {
-                                tail: Tail {
-                                    offset,
-                                    bytes,
-                                    kind,
-                                },
-                                recovery,
                             },
-                            Event::Packet(_) => unreachable!("header finder cannot emit a packet"),
-                        }));
-                    }
-                };
+                            recovery,
+                        },
+                        Event::Packet(_) => unreachable!("header finder cannot emit a packet"),
+                    }));
+                }
+            };
             let p = header.packet_length();
             report = Some(DrainReport {
                 offset,
@@ -241,6 +248,7 @@ impl<R: Read> WholePacketReader<R> {
         })();
         result.map_err(|reason| {
             self.framing.done = true;
+            self.refused = None;
             if let Some(r) = &mut report {
                 r.consumed_bytes = self.framing.position - r.offset;
             }

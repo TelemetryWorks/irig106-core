@@ -1,7 +1,8 @@
 # Core 0.2 explicit drain (L2-WHOLE-008)
 
-Branched from main 7273764, independently of parked checksum PR #29. Rebase onto
-main after that PR merges; this PR changes no checksum default or delivery policy.
+Originally branched from main 7273764 independently of #29. Owner Q7/Q8 on
+2026-11-28 approved default-ON checksums and drain option A. #29 is now merged;
+main 7b3783c was merged in (no rebase), preserving both API docs/package entries.
 Tests-first compilation failed for the absent drain APIs before implementation.
 
 `WholePacketReader::drain_next(deadline)` is the ONLY opt-in entry point. It
@@ -26,7 +27,7 @@ Source stability is rechecked; mutation aborts even after all bytes arrived.
 Pool cancellation and absolute deadlines are checked during header recovery,
 body reads and Interrupted retries, and before committing Drained. No check can
 interrupt an arbitrary blocking I/O operation; transport adapters own that bound.
-Any error/truncation is terminal. No sync search inside a refused/partial body.
+Drain errors/truncation are terminal. Whole H/B/target refusals alone are positioned. No sync search inside a refused/partial body.
 A fully drained frame establishes framing for subsequent EOF/tail handling only;
 it is not a complete delivered/inventory packet. Drained contents are deliberately
 unverified (Absent/NotChecked), so no checksum coverage may be claimed.
@@ -56,3 +57,15 @@ SourceChanged/Aborted must report only header+one quantum consumed, strictly les
 than requested. This pins the purpose of the current per-quantum source recheck,
 without changing the I/O/stamping strategy. The new tests kill >= at H and removal
 of only the per-quantum unchanged() call, while retaining the final check.
+
+
+Q8: one validated header/ranges/recovery cache keeps the body positioned after
+H/B/target errors; refused_header() exposes primary metadata, not PacketInfo.
+Only those three errors retain it; other errors clear it and terminate. Repeated
+whole calls re-evaluate the same frame. Explicit drain uses the cache, even on a
+live nonseekable source. Refusal→drain→normal packet and refusal→stop/no automatic
+drain are tested for H/B; a short huge claim pins TargetLimit on i686, and a
+CI-only full synthetic 4 GiB i686 test pins target refusal→drain→normal packet.
+Expired explicit drain after recovery retains aborted progress and recovery
+without additional consumption. Constructor accounting includes the new fixed
+cache. Q7 checksum policy is untouched; explicit omissions remain NotChecked.

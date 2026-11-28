@@ -194,7 +194,14 @@ fn refusals_legacy_and_no_speculative_growth_case() {
             ..
         }
     ));
-    assert!(r.next_packet_into(&mut b, deadline()).unwrap().is_none());
+    assert!(matches!(
+        r.next_packet_into(&mut b, deadline()).unwrap_err().reason,
+        ErrorKind::Admission {
+            source: AdmissionError::HardLimit { .. },
+            ..
+        }
+    ));
+    assert_eq!(r.position(), 24);
 }
 
 // Allocation instrumentation is test-only; the library forbids unsafe code.
@@ -1905,14 +1912,26 @@ fn explicit_drain_success_and_deadline_error_allocate_nothing() {
         let pool = BlockPool::with_defaults().unwrap();
         let mut r = WholePacketReader::stream(
             Cursor::new(frame(4096, 0, 9, 0)),
-            WholePolicy::new(),
+            WholePolicy::new().with_hard_limit(32),
             pool.clone(),
         )
         .unwrap();
+        let mut buf = PacketBuf::new(pool.clone()).unwrap();
         ALLOCATIONS.with(|c| c.set(Some(0)));
+        let refusal = r.next_packet_into(&mut buf, deadline());
         let result = r.drain_next(deadline());
         let count = ALLOCATIONS.with(|c| c.replace(None).unwrap());
         assert_eq!(count, 0);
+        assert!(matches!(
+            refusal,
+            Err(Error {
+                reason: ErrorKind::Admission {
+                    source: AdmissionError::HardLimit { .. },
+                    ..
+                },
+                ..
+            })
+        ));
         assert!(
             matches!(result, Ok(Some(DrainEvent::Report(d))) if d.disposition==DrainDisposition::Drained)
         );

@@ -71,8 +71,9 @@ is not a core packet boundary.
 ## Explicit drain implementation
 
 `reader.drain_next(absolute_deadline)` explicitly omits the next structurally
-framed packet. It never happens as a fallback from next_packet_into, whose
-refusals remain terminal. DrainReport records the validated header/declared ranges,
+framed packet. It never happens as a fallback from next_packet_into. Owner Q8
+(2026-11-28) retains the validated header on HardLimit/BudgetTooSmall/TargetLimit
+refusals so drain_next can explicitly consume that frame or the caller can stop. DrainReport records the validated header/declared ranges,
 requested/actually consumed frame bytes (including primary, excluding recovery),
 reason and Drained/Truncated disposition. DrainError retains typed Error and an
 Aborted progress report when a valid header was available. Framing tails stay
@@ -138,3 +139,13 @@ Future executable chunk coverage must pin byte/range continuity, no commit
 on every abort class, explicit disposition and early-stop accounting, source
 mutation, bounded chunk retention, deadlines and merger backpressure. These are
 outstanding implementation/qualification obligations, not passing checks here.
+
+
+Q8 positioned refusal detail: `refused_header()` borrows the checked primary.
+`position()` stays at frame offset + 24; body bytes are not logically consumed.
+Fixed read-ahead may already hold payload bytes. Retrying whole delivery retries
+the SAME frame and recovery evidence, never skips it. Only H/B/target size errors
+are nonterminal; Uncorroborated, allocation, cancellation/deadline, source/I/O and
+structural failures remain terminal. into_inner discards cached header/read-ahead;
+stopping does not rewind the underlying transport. The cache is one fixed
+metadata record charged through reader size at construction, never a body buffer.
