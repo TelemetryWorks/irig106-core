@@ -1,7 +1,7 @@
 //! Bounded header inventory. No payload bytes, packet history or diagnostics.
 use crate::{
-    AdmissionEvidence, Authorization, Event, Header, PacketInfo, SequenceObservation,
-    UnconfirmedReason,
+    AdmissionEvidence, Authorization, DataChecksumState, Event, Header, PacketInfo,
+    SequenceObservation, UnconfirmedReason,
 };
 use std::{collections::BTreeMap, fmt};
 
@@ -126,6 +126,38 @@ impl AdmissionCounts {
         Ok(self)
     }
 }
+/// Complete-frame checksum outcomes, including capture/opt-out coverage gaps.
+/// These fixed counters partition totals().packets; mismatch is not a refusal.
+/// ```compile_fail,E0639
+/// use irig106_core::DataChecksumCounts;
+/// fn closed(c: DataChecksumCounts) { let _ = DataChecksumCounts { ..c }; }
+/// ```
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DataChecksumCounts {
+    /// No checksum declared.
+    pub absent: u64,
+    /// Declared but not verified (capture or explicit opt-out).
+    pub not_checked: u64,
+    /// Stored and computed values agree.
+    pub verified: u64,
+    /// Complete packet has differing sums.
+    pub mismatch: u64,
+}
+impl DataChecksumCounts {
+    fn after(mut self, state: DataChecksumState) -> Result<Self, InspectionError> {
+        let counter = match state {
+            DataChecksumState::Absent => &mut self.absent,
+            DataChecksumState::NotChecked => &mut self.not_checked,
+            DataChecksumState::Verified { .. } => &mut self.verified,
+            DataChecksumState::Mismatch { .. } => &mut self.mismatch,
+        };
+        *counter = counter
+            .checked_add(1)
+            .ok_or(InspectionError::CountOverflow)?;
+        Ok(self)
+    }
+}
 /// One (channel, raw data-type) row; exists only after a successful observation.
 /// ```compile_fail,E0639
 /// use irig106_core::ChannelStats;
@@ -228,6 +260,7 @@ pub struct Inspection {
     limits: InspectionLimits,
     totals: Counts,
     admission: AdmissionCounts,
+    data_checksums: DataChecksumCounts,
     channels: BTreeMap<u16, ChannelSequence>,
     skipped_bytes: u64,
     rows: BTreeMap<(u16, u8), ChannelStats>,
@@ -243,6 +276,7 @@ impl Inspection {
             limits,
             totals: Counts::default(),
             admission: AdmissionCounts::default(),
+            data_checksums: DataChecksumCounts::default(),
             channels: BTreeMap::new(),
             skipped_bytes: 0,
             rows: BTreeMap::new(),
@@ -267,7 +301,13 @@ impl Inspection {
         } else {
             match event {
                 Event::Packet(p) => self
-                    .record(&p.header, p.offset, p.recovered_bytes, None)
+                    .record(
+                        &p.header,
+                        p.offset,
+                        p.recovered_bytes,
+                        None,
+                        p.ranges.data_checksum,
+                    )
                     .map(Some),
                 Event::Tail { .. } => {
                     self.mark_incomplete();
@@ -297,6 +337,7 @@ impl Inspection {
                 packet.offset,
                 packet.recovered_bytes,
                 Some(&packet.admission),
+                packet.ranges.data_checksum,
             )
         };
         if result.is_err() {
@@ -310,6 +351,7 @@ impl Inspection {
         offset: u64,
         recovered_bytes: u64,
         evidence: Option<&AdmissionEvidence>,
+        checksum: DataChecksumState,
     ) -> Result<SequenceObservation, InspectionError> {
         let key = (h.channel(), h.data_type());
         if !self.channels.contains_key(&key.0) && self.channels.len() >= self.limits.max_channels {
@@ -324,6 +366,7 @@ impl Inspection {
         }
         // Compute every fallible value before changing any inventory state.
         let admission = self.admission.after(evidence)?;
+        let data_checksums = self.data_checksums.after(checksum)?;
         let skipped_bytes = self
             .skipped_bytes
             .checked_add(recovered_bytes)
@@ -358,6 +401,7 @@ impl Inspection {
         self.rows.insert(key, row);
         self.totals = totals;
         self.admission = admission;
+        self.data_checksums = data_checksums;
         self.types[key.1 as usize] = type_counts;
         self.seen[0] |= key == (0, 1);
         self.seen[1] |= key.1 == 3;
@@ -391,6 +435,11 @@ impl Inspection {
     /// fabricate authorization. Retained on tails/errors; read status for scope.
     pub fn admission_counts(&self) -> AdmissionCounts {
         self.admission
+    }
+    /// Checksum outcomes over all accepted complete observations, including
+    /// NotChecked for capture/opt-out. Retained on failure; read status for scope.
+    pub fn data_checksum_counts(&self) -> DataChecksumCounts {
+        self.data_checksums
     }
     /// Number of retained distinct channels.
     pub fn channel_count(&self) -> usize {
@@ -480,6 +529,50 @@ mod tests {
         }
     }
 
+    #[test]
+    fn checksum_counter_overflow_commits_nothing() {
+        let bytes = [
+            0x25, 0xeb, 0, 0, 28, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0x45, 0xf4, 1,
+            2, 3, 4,
+        ];
+        for state in [
+            DataChecksumState::Absent,
+            DataChecksumState::NotChecked,
+            DataChecksumState::Verified { width: 4, value: 0 },
+            DataChecksumState::Mismatch {
+                width: 4,
+                stored: 1,
+                computed: 0,
+            },
+        ] {
+            let mut event = PacketReader::new(&bytes[..], ReaderLimits::new())
+                .unwrap()
+                .next_packet(|_| 0)
+                .unwrap()
+                .unwrap();
+            let Event::Packet(ref mut packet) = event else {
+                panic!("packet")
+            };
+            packet.ranges.data_checksum = state;
+            let mut a = Inspection::new(InspectionLimits::new(1, 1));
+            let c = match state {
+                DataChecksumState::Absent => &mut a.data_checksums.absent,
+                DataChecksumState::NotChecked => &mut a.data_checksums.not_checked,
+                DataChecksumState::Verified { .. } => &mut a.data_checksums.verified,
+                DataChecksumState::Mismatch { .. } => &mut a.data_checksums.mismatch,
+            };
+            *c = u64::MAX - 1;
+            a.observe(&event).unwrap();
+            let before = (a.data_checksums, a.totals, a.admission, a.skipped_bytes);
+            assert_eq!(a.observe(&event), Err(InspectionError::CountOverflow));
+            assert_eq!(
+                (a.data_checksums, a.totals, a.admission, a.skipped_bytes),
+                before
+            );
+            assert_eq!((a.channel_count(), a.rows().count()), (1, 1));
+            assert_eq!(a.status(), ScanStatus::Incomplete);
+        }
+    }
     #[test]
     fn cumulative_skipped_bytes_accept_exact_max_then_reject_atomically() {
         let mut b = [

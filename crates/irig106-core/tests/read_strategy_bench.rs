@@ -37,12 +37,55 @@ impl<R: Read> Read for Counted<R> {
 #[test]
 #[ignore = "owner decision evidence only; release-mode matrix runs explicitly in CI"]
 fn small_body_read_strategy_benchmark() {
-    watchdog(
-        Duration::from_secs(120),
-        small_body_read_strategy_benchmark_case,
-    );
+    watchdog(Duration::from_secs(120), || read_benchmark_case(false));
 }
-fn small_body_read_strategy_benchmark_case() {
+#[test]
+#[ignore = "checksum cost evidence only; release-mode CI, no timing gate"]
+fn data_checksum_cost_benchmark() {
+    watchdog(Duration::from_secs(120), || read_benchmark_case(true));
+}
+fn machine_evidence() {
+    let model = std::fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .and_then(|raw| {
+            raw.lines()
+                .find_map(|line| {
+                    let (key, value) = line.split_once(':')?;
+                    matches!(key.trim(), "model name" | "Hardware" | "Processor")
+                        .then(|| value.trim().to_owned())
+                })
+                .or_else(|| {
+                    let fields: Vec<_> = raw
+                        .lines()
+                        .filter(|line| {
+                            line.starts_with("CPU implementer") || line.starts_with("CPU part")
+                        })
+                        .take(2)
+                        .collect();
+                    (!fields.is_empty()).then(|| fields.join("; "))
+                })
+        })
+        .unwrap_or_else(|| "unavailable (/proc/cpuinfo has no model)".to_owned());
+    macro_rules! features {
+        ($($feature:literal),* $(,)?) => {
+            [$(( $feature, cfg!(target_feature = $feature) )),*]
+                .into_iter().filter_map(|(name, enabled)| enabled.then_some(name)).collect::<Vec<_>>()
+        };
+    }
+    // Compile-time ISA flags, not the runtime CPU's potentially wider features.
+    let features = features!(
+        "fxsr", "sse", "sse2", "sse3", "ssse3", "sse4.1", "sse4.2", "avx", "avx2", "avx512f",
+        "avx512bw", "avx512dq", "avx512vl", "fma", "neon", "sve", "sve2"
+    );
+    println!(
+        "benchmark_machine arch={} os={} cpu_model={model}",
+        std::env::consts::ARCH,
+        std::env::consts::OS
+    );
+    println!("benchmark_target_features={features:?} (compile-time baseline/vector flags)");
+}
+fn read_benchmark_case(checksums: bool) {
+    machine_evidence();
     use std::{
         fs::{File, OpenOptions},
         io::{BufWriter, Write},
@@ -88,8 +131,8 @@ fn small_body_read_strategy_benchmark_case() {
         pool: &BlockPool,
         buf: &mut PacketBuf,
         packets: usize,
-        p: usize,
         policy: WholePolicy,
+        expected_checksum: Option<bool>,
     ) -> Sample {
         let mut reader = WholePacketReader::stream(input, policy, pool.clone()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(60);
@@ -97,17 +140,37 @@ fn small_body_read_strategy_benchmark_case() {
         let start = Instant::now();
         let mut seen = 0usize;
         let mut digest = 0usize;
+        let mut checksum_outcomes = 0u8;
         while let Some(event) = reader.next_packet_into(buf, deadline).unwrap() {
             assert!(matches!(event, WholeEvent::Packet));
             let bytes = std::hint::black_box(buf.contiguous().unwrap());
-            digest = digest.wrapping_add(usize::from(bytes[0]) + usize::from(bytes[p - 1]));
+            digest = digest.wrapping_add(usize::from(bytes[0]));
+            // Retain a fixed outcome mask; assert after timing. Every measured
+            // packet must have exactly the requested state, with no extra pass
+            // or per-packet history allocation.
+            checksum_outcomes |=
+                match std::hint::black_box(buf.info().unwrap().ranges.data_checksum) {
+                    DataChecksumState::Absent => 1,
+                    DataChecksumState::NotChecked => 2,
+                    DataChecksumState::Verified { .. } => 4,
+                    _ => 8,
+                };
             seen += 1;
         }
         let seconds = start.elapsed().as_secs_f64();
         let after = kernel_reads();
         let kernel = before.zip(after).map(|(a, b)| b - a - 1);
+        assert_eq!(
+            checksum_outcomes,
+            match expected_checksum {
+                Some(true) => 4,  // Every ON packet Verified; no other outcome bit.
+                Some(false) => 2, // Every OFF packet NotChecked.
+                None => 1,        // Read-strategy fixtures declare no checksum.
+            },
+            "unexpected checksum outcome in measured packets"
+        );
         assert_eq!(seen, packets);
-        assert_eq!(digest, packets * (0x25 + 0x5a));
+        assert_eq!(digest, packets * 0x25);
         let calls = count(reader.into_inner());
         #[cfg(target_os = "linux")]
         assert_eq!(
@@ -126,16 +189,29 @@ fn small_body_read_strategy_benchmark_case() {
         .map(|v| v.parse::<usize>().unwrap())
         .unwrap_or(16 * 1024 * 1024);
     assert!((524_288..=32 * 1024 * 1024).contains(&target));
+    if !checksums {
+        println!(
+            "small_body benchmark: actual adaptive hybrid (64 KiB, cutoff 4 KiB) versus direct baseline (24-byte header buffer, cutoff 0), median of 3, alternating order; generation/construction/first block initialization excluded; warm cache; EOF read included"
+        );
+        println!(
+            "small_body,size,width_bytes,mode,packets,bytes,source_reads,kernel_read_syscalls,seconds,packets_per_s,MB_per_s"
+        );
+    }
+    let label = if checksums {
+        "data_checksum"
+    } else {
+        "small_body"
+    };
     println!(
-        "small_body benchmark: actual adaptive hybrid (64 KiB, cutoff 4 KiB) versus direct baseline (24-byte header buffer, cutoff 0), median of 3, alternating order; generation/construction/first block initialization excluded; warm cache; EOF read included"
+        "{label}: median of 3 alternating modes; checksum comparison uses same actual hybrid and valid fixtures, generation/construction/warm-up excluded; warm-cache informational throughput; checksum 64/512 KiB cases aggregate 16 timed passes per sample over the same bounded file for precision"
     );
-    println!(
-        "small_body,size,mode,packets,bytes,source_reads,kernel_read_syscalls,seconds,packets_per_s,MB_per_s"
-    );
-    for (case, p) in [28usize, 400, 4096, 65_536, 524_288]
-        .into_iter()
-        .enumerate()
-    {
+    let widths: &[usize] = if checksums { &[1, 2, 4] } else { &[0] };
+    for (width, case, p) in widths.iter().flat_map(|&width| {
+        [28usize, 400, 4096, 65_536, 524_288]
+            .into_iter()
+            .enumerate()
+            .map(move |(case, p)| (width, case, p))
+    }) {
         let packets = target / p;
         let total = packets * p;
         let stamp = SystemTime::now()
@@ -155,8 +231,22 @@ fn small_body_read_strategy_benchmark_case() {
                 .open(&path.0)
                 .unwrap(),
         );
-        let mut bytes = frame(p as u32, 0, 9, 0);
-        bytes[8..12].copy_from_slice(&((p - 24) as u32).to_le_bytes());
+        let flag = match width {
+            0 => 0,
+            1 => 1,
+            2 => 2,
+            _ => 3,
+        };
+        let mut bytes = frame(p as u32, 0, 9, flag);
+        bytes[8..12].copy_from_slice(&((p - 24 - width) as u32).to_le_bytes());
+        if width > 0 {
+            let sum: u64 = bytes[24..p - width]
+                .iter()
+                .enumerate()
+                .map(|(i, &b)| u64::from(b) << (8 * (i % width)))
+                .sum();
+            bytes[p - width..].copy_from_slice(&(sum as u32).to_le_bytes()[..width]);
+        }
         let checksum = bytes[..22].chunks_exact(2).fold(0u16, |sum, w| {
             sum.wrapping_add(u16::from_le_bytes([w[0], w[1]]))
         });
@@ -172,36 +262,61 @@ fn small_body_read_strategy_benchmark_case() {
         drop(warm.try_next_block().unwrap());
         drop(warm);
         let mut samples: [Vec<Sample>; 2] = std::array::from_fn(|_| Vec::with_capacity(3));
+        // Aggregate repeated timed passes for the sub-ms large cases; both
+        // modes use the same file/work, with construction excluded each pass.
+        let repeats = if checksums && p >= 65_536 { 16 } else { 1 };
         for repetition in 0..3 {
-            for turn in 0..2 {
-                let mode = (case + repetition + turn) % 2;
-                let file = Counted {
-                    input: File::open(&path.0).unwrap(),
-                    calls: 0,
-                };
-                let policy = if mode == 0 {
-                    WholePolicy::new()
-                        .with_read_ahead_bytes(24)
-                        .with_small_body_cutoff(0)
-                } else {
-                    WholePolicy::new()
-                };
-                let sample = measure(
-                    file,
-                    |source| source.calls,
-                    &pool,
-                    &mut buf,
-                    packets,
-                    p,
-                    policy,
-                );
+            let mut batch: [Sample; 2] = std::array::from_fn(|_| Sample {
+                seconds: 0.0,
+                calls: 0,
+                kernel: Some(0),
+            });
+            for pass in 0..repeats {
+                for turn in 0..2 {
+                    let mode = (case + repetition + pass + turn) % 2;
+                    let file = Counted {
+                        input: File::open(&path.0).unwrap(),
+                        calls: 0,
+                    };
+                    let policy = if checksums {
+                        WholePolicy::new().with_data_checksum_verification(mode == 1)
+                    } else if mode == 0 {
+                        WholePolicy::new()
+                            .with_read_ahead_bytes(24)
+                            .with_small_body_cutoff(0)
+                    } else {
+                        WholePolicy::new()
+                    };
+                    let sample = measure(
+                        file,
+                        |source| source.calls,
+                        &pool,
+                        &mut buf,
+                        packets,
+                        policy,
+                        checksums.then_some(mode == 1),
+                    );
+                    batch[mode].seconds += sample.seconds;
+                    batch[mode].calls += sample.calls;
+                    batch[mode].kernel = batch[mode].kernel.zip(sample.kernel).map(|(a, b)| a + b);
+                }
+            }
+            for (mode, sample) in batch.into_iter().enumerate() {
                 samples[mode].push(sample);
             }
         }
+        let packets = packets * repeats;
+        let total = total * repeats;
         for (index, mut group) in samples.into_iter().enumerate() {
             group.sort_by(|a, b| a.seconds.total_cmp(&b.seconds));
             let median = &group[1];
-            let mode = if index == 0 {
+            let mode = if checksums {
+                if index == 0 {
+                    "checksum_off"
+                } else {
+                    "checksum_on"
+                }
+            } else if index == 0 {
                 "direct"
             } else {
                 "adaptive_hybrid_64KiB_cutoff4KiB"
@@ -210,7 +325,7 @@ fn small_body_read_strategy_benchmark_case() {
                 .kernel
                 .map_or_else(|| "unsupported".to_owned(), |n| n.to_string());
             println!(
-                "small_body,{p},{mode},{packets},{total},{},{kernel},{:.6},{:.1},{:.1}",
+                "{label},{p},{width},{mode},{packets},{total},{},{kernel},{:.6},{:.1},{:.1}",
                 median.calls,
                 median.seconds,
                 packets as f64 / median.seconds,

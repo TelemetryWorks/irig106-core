@@ -292,7 +292,8 @@ Uncorroborated, SourceChanged or TargetLimit causes; storage failures are
 explicit StreamOptIn evidence. Probe errors restore the cursor or fail closed;
 lookahead never advances logical offsets/recovery. Known short stable input drains
 to EOF with fixed scratch and emits a truncation, not a complete prefix.
-Secondary integrity stays structural; DATA checksum contents remain NotChecked.
+Slice-3 evidence predates data-checksum verification; the current whole-mode
+checksum contract is below. Capture remains NotChecked.
 Explicit coalescing, drain/chunk delivery, broader platform/RSS controls and
 performance comparison remain later slices. See [slice-3 evidence](verification-v02-s03.md).
 
@@ -409,3 +410,21 @@ terminal. No body rescan or silent prefix. A complete omission establishes frami
 for EOF/tail handling only. Mark unfiltered inventory incomplete and invalidate
 omitted setup/time context as appropriate. See [streaming contract](streaming.md)
 and [drain evidence](verification-v02-drain.md). Chunk delivery remains pending.
+
+
+### Whole-mode packet-data checksums (owner 2026-11-26)
+
+Verification is ON by default. Explicit `WholePolicy::with_data_checksum_verification(false)`
+skips work for speed and reports NotChecked when a checksum is declared; no
+checksum remains Absent. `PacketInfo.ranges.data_checksum` gains Verified
+{width,value} and Mismatch {width,stored,computed}, with byte widths 1/2/4.
+Mismatch is evidence on a complete packet, never a default refusal/drop/recovery.
+Accumulate each arriving pooled span once, covering body plus filler and excluding
+both headers and stored checksum, without payload copies or a final frame pass.
+Capture mode is unchanged. Coalesced metadata preserves the result.
+
+`Inspection::data_checksum_counts()` partitions accepted complete observations
+into absent/not_checked/verified/mismatch; capture and opt-out report coverage
+explicitly. Counters commit atomically with existing inventory state. Example
+summaries append `data_checksums=...`; they retain counts after errors and keep
+their existing exit policy. See [scope and cost evidence](verification-v02-data-checksum.md).

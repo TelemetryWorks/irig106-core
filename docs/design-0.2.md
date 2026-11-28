@@ -345,8 +345,10 @@ Begin/chunk/end records carry packet identity, offsets, limits and authorization
 chunks are provisional until complete consumption. On EOF/error, no successful
 End is emitted. Sink errors are typed and terminal. Chunk consumers must bound
 parser/output state; neither chunk mode nor drain is an automatic fallback.
-Secondary/trailer evidence remains structural; data checksum contents stay
-NotChecked until a separate validation assignment.
+Owner 2026-11-26 separately approved packet-data checksum verification: whole
+mode verifies by default with an explicit speed opt-out. Body+filler sums are
+incremental over arriving spans; mismatch is evidence, never default refusal.
+Capture remains NotChecked; see [verification scope](verification-v02-data-checksum.md).
 
 ## Corner-case decisions
 

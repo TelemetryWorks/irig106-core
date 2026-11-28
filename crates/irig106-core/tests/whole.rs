@@ -246,8 +246,8 @@ fn mixed_ordinary_frames_allocate_zero_after_warmup_case() {
     let mut buf = PacketBuf::new(pool.clone()).unwrap();
     let mut bytes = Vec::new();
     for _ in 0..8 {
-        for p in [28, 400, 4096, 524_288] {
-            bytes.extend(frame(p, 3, 9, 0));
+        for (p, flags) in [(28, 0), (400, 1), (4096, 2), (524_288, 3)] {
+            bytes.extend(frame(p, 3, 9, flags));
         }
     }
     let mut r = WholePacketReader::stream(Cursor::new(bytes), WholePolicy::new(), pool).unwrap();
