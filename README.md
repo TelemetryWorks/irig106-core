@@ -1,51 +1,55 @@
 # irig106-core
 
-Chapter 10 packet finding and structural checking for the TelemetryWorks IRIG 106
-ecosystem. Version 0.1.0 provides a primary
-header/checksum parser and the promoted bounded reader under
-`crates/irig106-core`, with typed completion/errors and optional caller recovery
-caps (default None), secondary integrity evidence and checked trailer ranges.
-Packet-data checksum contents are reported NotChecked.
-Configure ReaderLimits with new()/Default and builders.
-Bounded Inspection adds complete-frame totals, raw type/channel rows and
-completion-qualified presence facts with explicit channel/row budgets.
-Per-channel sequence comparisons include wrap and preserve recovery evidence;
-discontinuities do not prove packet loss.
-An expected successor after skipped input is Unverified; per-channel recovery
-intervals include skips attached to other channels.
+Version 0.2.0 provides structural Chapter 10 packet traversal using the
+106-24R1 Chapter 11 layout. It retains the bounded DATA-prefix reader and adds
+whole-packet ownership, explicit admission evidence and optional coalescing,
+drain and callback-scoped chunks. Payload interpretation stays downstream.
 
-The virtual workspace uses edition 2024, MSRV 1.85 and Apache-2.0. It currently
-has one library. Published `irig106-types` 0.1 (defaults disabled) is its sole
-dependency, supplying the shared `Rtc`; no payload interpretation is performed.
+Whole mode uses reusable 512 KiB blocks, a default 128 MiB hard ceiling H and
+256 MiB shared storage budget B, both caller-overridable. Storage grows on receipt
+with one bounded provisional block, never by reserving the declared length.
+One fixed 64 KiB read-ahead buffer serves headers/recovery and small bodies;
+large remainders read directly into pooled storage. The configurable small-body
+cutoff defaults to 4 KiB. Warmed ordinary reuse is allocation-free in scoped tests;
+new inventory entries and caller-owned queues/output have separate bounds.
 
-- [Requirements and nine-slice plan](docs/requirements.md)
-- [Development API and boundary behavior](docs/api.md)
-- [Consumer migration contract and examples](docs/migration.md)
-- [Seed provenance and slice 1 verification](docs/provenance.md)
+Packet-data checksums default ON for whole/chunk delivery, with an explicit speed
+opt-out. Verified/Mismatch are integrity evidence; mismatch does not reject by
+default. Capture remains Absent/NotChecked. Recovery has no default search cap;
+optional caller caps return typed errors. Presence and per-channel sequence facts
+retain recovery uncertainty. Observe complete PacketInfo once on the ordered
+path; chunk/drain results are distinct, never complete-packet inventory input.
+
+The virtual workspace has one library at crates/irig106-core, Rust edition 2024,
+MSRV 1.85 and Apache-2.0. Published `irig106-types ^0.1` (default features off,
+locked to 0.1.0) supplies `Rtc` and is the sole dependency. **Core 0.2 does not
+require types 0.2.** No no_std/alloc, payload decoding or full conformance claim.
+
+- [Requirements](docs/requirements.md) and [0.2 coverage audit / open limits](docs/coverage-0.2.md)
+- [API contract](docs/api.md), [migration](docs/migration.md), [ordered/streaming consumers](docs/streaming.md)
+- [Design](docs/design-0.2.md), [seed provenance](docs/provenance.md), [release notes](docs/releases/v0.2.0.md)
 - [Organization contributor guidance](https://github.com/TelemetryWorks/.github/blob/main/CONTRIBUTING.md)
 
-Development checks (Python 3 and stable Rust; no Python dependencies):
+Light local checks (Python 3, Rust; no Python dependencies):
 
 ```sh
-python3 scripts/test_workspace.py
+CARGO_BUILD_JOBS=2 python3 scripts/test_workspace.py
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --locked
+CARGO_BUILD_JOBS=2 cargo clippy --workspace --all-targets --locked -- -D warnings
+CARGO_BUILD_JOBS=2 cargo test --workspace --locked
+python3 -m unittest discover -s scripts/release -p 'test_*.py'
 ```
 
-CI also checks Rust 1.85, Linux/macOS/Windows, docs, exact package file lists,
-verified packaged-source builds, executed public examples and
-`cargo deny check` (deny.toml: advisories, licences, bans and registry-only sources).
-Use light focused local checks with `CARGO_BUILD_JOBS=2`. The CI-only
-[isolated RSS gate](docs/verification-s08.md) measures a release reader/inventory
-process on a 240 MiB fixture with a 32 MiB ceiling, including a complete 64 MiB
-packet (4-byte capture) and a 48 MiB mid-file recovery gap. Separate one-off
-controls check packet-sized draining and recovery retention. This is scoped regression evidence, not a universal memory
-or throughput guarantee. no_std/alloc and packet-data checksum validation are
-tracked follow-ups, not 0.1 features.
+CI covers MSRV, Linux/macOS/Windows, executed Windows i686 tests, public examples,
+package inventory/archived-source verification, dependency policy and workflow
+audits. Heavy memory qualification stays in CI: capture retains its 32 MiB RSS
+gate; whole-mode small cases use 12 MiB, with separately justified 24/80/144/272
+MiB pressure/large/coalesced ceilings. These probes are scoped regression evidence,
+not a general memory guarantee; RSS sees touched resident pages, not unwritten
+reserved capacity. See the [coverage audit](docs/coverage-0.2.md).
 
-The base [Trusted Publishing pipeline](docs/RELEASING.md) supplies six release
-jobs and a read-only PR/manual Publish path dry run. Its known-good comparison
-uses published core 0.0.1; PR dry-run artifacts are unsigned. Release preparation
-requires review and passing CI. Tagging and publishing remain separately controlled,
-with OIDC-only publication in crates-io, owner approval and a separate release decision.
+The [Trusted Publishing pipeline](docs/RELEASING.md) qualifies and verifies the
+0.2.0 candidate and unsigned publish path, retaining the pinned published 0.0.1
+known-good fixture. Preparing this version does not authorize publication.
+Tagging, signing, crates-io approval and publication require the owner's release
+decision; no local token upload or settings change is part of this PR.

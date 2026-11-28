@@ -2,7 +2,7 @@
 
 The repository uses the **base** [org standard at 2adedc5](https://github.com/TelemetryWorks/.github/blob/2adedc5aaf27b7bafb54ad05a51bc17d89b65d3e/docs/TRUSTED-PUBLISHING.md),
 which retains the fcceb02 requirements, adopted in reviewed PR12.
-The manifest selects 0.1.0. Release preparation requires independent exact-head
+The manifest selects the 0.2.0 candidate. Release preparation requires independent exact-head
 review, a passing PR dry run and owner merge. After the owner confirms Trusted
 Publisher settings, the coordinator pushes the annotated tag and the owner
 approves crates-io. This document does not authorize tagging, publication,
@@ -12,7 +12,8 @@ Identity remains **TelemetryWorks/irig106-core**, **trusted-publishing.yml**,
 environment **crates-io**, workflow name **Trusted publishing**. The virtual
 workspace releases its single library at crates/irig106-core; changing that set
 fails closed until ordering/membership are reviewed. Types 0.1 stays a registry
-dependency, not part of core's release set.
+dependency, not part of core's release set. Core 0.2 does not require types 0.2;
+Cargo.lock retains published types 0.1.0.
 
 The six base jobs are Release gate, Build, Checksums and attestations, Publish
 to crates.io, GitHub release, Verify publication. A seventh read-only job is
@@ -23,7 +24,8 @@ enter crates-io or publish, even for a manual dispatch from a tag. Missing futur
 release records are findings on these routes, fatal on tag pushes.
 
 Build pins Rust 1.100.0, MSRV 1.85.0 and cargo-cyclonedx 0.5.9 --locked. Core
-tests, examples, RSS, archive verification and release controls run before upload
+tests, inspect/ordered examples, maximum-setup/coalescing oracle, capture/whole
+memory probes, archive verification and release controls run before upload
 approval, also on PRs. The actual build Rust version is an output used and
 rechecked by non-compiling repackaging in Publish and Publish path (dry run).
 The frozen payload contains the crate, CycloneDX SBOM and strict SHA256SUMS.
@@ -56,7 +58,9 @@ registration for this exact filename/environment, trustpub_only=true, required
 owner approval, v* TAG deployment eligibility and disabled admin bypass. YAML
 guards are defense in depth; they do not create those server-side barriers.
 Only public registry only-mode was observed here; private registration and
-environment protection are not claimed verified. Prepare the version/lockfile,
+environment protection are not claimed verified. The 0.2 [coverage audit](coverage-0.2.md) records unverified limits and release
+checks that require the owner/tag path; an unsigned dry run cannot discharge them.
+Prepare the version/lockfile,
 dated changelog and docs/releases/vX.Y.Z.md in a reviewed release-preparation PR.
 No tag, signing, upload, dispatch or settings change was executed by adoption.
 

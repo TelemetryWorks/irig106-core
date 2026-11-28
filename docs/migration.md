@@ -1,11 +1,11 @@
-# Consumer migration contract for core 0.1
+# Consumer migration contract: core 0.1 to 0.2
 
-This contract guides downstream adoption of core 0.1.0; it is not evidence of
+This contract guides adoption of core 0.2.0 and its retained 0.1 capture API; it is not evidence of
 changes in downstream repos. Time's resume replaces its duplicate reader after
 core publication under separate authorization. Downstream implementation and
 publication remain separate work.
 
-## Time's promoted transport
+## Retained capture API / time's promoted transport
 
 The source is [time 5899806 input.rs](https://github.com/TelemetryWorks/irig106-time/blob/5899806ae684ed38d8cad8f422cabb3d47c6be0f/apps/irig106-time-cli/src/input.rs),
 with review lineage in [provenance](provenance.md). The structural reader moved;
@@ -20,7 +20,7 @@ default features off; it re-exports the same Rtc vocabulary.
 | Empty or lone truncated input | NoCompletePacket at observed EOF; preserve tail and recovery evidence. The owning CLI maps fatal input to exit 3 across its commands. |
 | Complete packet then tail | Keep earlier analysis and report the tail. Established-stream EOF padding remains a finding; do not impose a default recovery cap. |
 | Payload capture | body_prefix contains DATA only. Compare captured length with Data Length before a complete-body decoder. Filler/trailer are drained. |
-| Time/integrity | Primary RTC survives secondary checksum findings. Secondary bytes remain raw; packet-data checksums are Absent/NotChecked, never claimed Valid. |
+| Time/integrity | Primary RTC survives secondary checksum findings. Secondary bytes remain raw; capture packet-data checksums stay Absent/NotChecked; whole/chunk results differ. |
 
 Concrete source edits for seed consumers:
 
@@ -81,7 +81,7 @@ unsafe code, obsolete flag meanings or growing diagnostic vectors into core.
   for payload validity, including when the entire DATA field was captured.
 
 
-## Unreleased 0.2 whole-packet orchestration example
+## Whole-packet orchestration (0.2)
 
 `cargo run -p irig106-core --example ordered --locked < recording.ch10` uses
 WholePacketReader and four reusable PacketBuf owners with two bounded workers.
@@ -93,9 +93,56 @@ before integrating context, cancellation or output merging. CI executes independ
 stdin fixtures with an external timeout; downstream integration is still separate.
 
 
-The unreleased 0.2 examples append an `admission=AdmissionCounts { ... }` summary.
+The 0.2 examples append an `admission=AdmissionCounts { ... }` summary.
 Use Inspection::admission_counts() for typed counters rather than parsing Debug.
 Capture events have no authorization evidence, so capture-only evaluated_packets
 is zero even with nonzero totals. Whole PacketInfo contributes exactly once after
 successful inspection. Over-soft and legacy counts overlap the authorization
 partition; Unconfirmed(ExactEof) retains its uncertainty. See [API scope](api.md).
+
+
+## Adopting 0.2 whole delivery and optional modes
+
+- Existing PacketReader/ReaderLimits calls keep the bounded DATA-prefix contract;
+  upgrading does not enable whole retention or checksum verification in capture.
+  Use WholePacketReader + reusable PacketBuf explicitly when full frames are needed.
+  One owner per in-flight packet; borrow contiguous()/spans inside workers and
+  return owners without waiting on a merger holding their input credits.
+- Construct BlockPool and WholePolicy explicitly. Defaults H=128 MiB, B=256 MiB,
+  512 KiB blocks, 64 KiB read-ahead and 4 KiB cutoff do not preallocate H/B.
+  A tiny whole packet still occupies a block; queue depth needs its own bound.
+  Ordinary returns retain warm capacity, not an automatic eight-block idle cap.
+- Do not cast DataChecksumState with `as`; it now has data-carrying variants.
+  DataChecksumState is non-exhaustive: retain a `_` arm and handle Verified and
+  Mismatch explicitly. Whole/chunk verification is ON, opt-out yields NotChecked;
+  Mismatch is delivered evidence, not a default error or payload-validity claim.
+  Inspection::data_checksum_counts() reports absent/not_checked/verified/mismatch.
+  Example summaries append data_checksums as well as admission; use typed
+  accessors rather than parsing Debug, and account for capture's missing coverage.
+- Match typed Admission/Pool errors. Q8 HardLimit/BudgetTooSmall/TargetLimit
+  retain the checked header at offset+24; logging and continuing repeats the same
+  refusal forever. Explicitly drain_next or stop (authorized fixed chunks are an
+  option for whole B/target storage refusal). Other errors remain terminal.
+  into_inner discards pending header/read-ahead; do not resume from its physical
+  cursor as though it were a packet boundary.
+- Check contiguous() before coalesce_until, which always copies even one block.
+  Budget includes source blocks plus new copy/metadata, and default B refuses a
+  maximum-setup copy. Copy credit shortage is immediate WouldBlock; its deadline
+  bounds the copy, not a credit wait. Inspect original OR copy, never both.
+- drain_next is an explicit reported omission. next_chunks borrows fixed 4 KiB
+  provisional spans only for the callback; stage output until returned End and
+  invalidate on Abort. Neither report is PacketInfo or accepted inventory input.
+  Mark omitted inventory incomplete or define a separate retained scope. Semantic
+  setup/time closure cannot be inferred from header notices or drained contents.
+- Pool waits need deadlines or non-blocking try-acquire when a caller retains
+  earlier input on the same thread. Cancellation is pool-wide/terminal. Source
+  reads and callbacks need their own blocking bounds: cooperative deadlines do
+  not preempt them. StableSource adapters must supply trustworthy identity/size/
+  revision evidence; pipes need explicit oversoft StreamOptIn. UDP reassembly,
+  packet loss/order policy and async scheduling remain outside core.
+
+Core's registry requirement remains irig106-types ^0.1 (default features off),
+locked to 0.1.0. Core uses/re-exports Rtc; types 0.2 is neither required nor in
+this release set. Downstream crates may keep types 0.1, and no cross-repository
+version bump or publication was performed here. See [coverage/open limits](coverage-0.2.md)
+and [the streaming protocol](streaming.md) before choosing a delivery mode.

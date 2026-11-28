@@ -32,7 +32,7 @@ class WorkspaceContract(unittest.TestCase):
         """Preserve package metadata and use only the approved registry dependency."""
         package, = self.metadata()["packages"]
         self.assertEqual(package["name"], "irig106-core")
-        self.assertEqual(package["version"], "0.1.0")
+        self.assertEqual(package["version"], "0.2.0")
         self.assertEqual(package["edition"], "2024")
         self.assertEqual(package["rust_version"], "1.85")
         self.assertEqual(package["license"], "Apache-2.0")
