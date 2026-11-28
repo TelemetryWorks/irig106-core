@@ -1,11 +1,12 @@
-# Core 0.2 slice 1: complete packets with bounded incremental storage
+# Core 0.2 design: complete packets with bounded incremental storage
 
-**Design from #16, aligned with owner decisions approved 2026-11-25.**
-No whole-packet reader implementation is claimed here. This supersedes the
-fixed-capture/drain proposal as the normal 0.2 path. The 0.1 bounded-capture API,
-its allocation rule and RSS gates are preserved; the whole-packet requirements
-below are approved but await implementation and independent verification.
-Version, publishing and library dependencies are unchanged. Baseline: [published-0.1 harness](../scripts/benchmarks/core-0.1/README.md).
+Design from #16, aligned with owner decisions of 2026-11-25/26/28 and
+implemented through reviewed #31. The 0.1 bounded-capture API and its allocation
+rule/RSS gate are preserved; whole packets are the new opt-in complete-delivery
+path. This is the current design, not an unimplemented proposal. Historical slice
+verification ledgers record their own earlier boundaries. See [the coverage
+audit](coverage-0.2.md) for implemented versus verified scope, partial obligations
+and release-candidate evidence. Baseline: [published-0.1 harness](../scripts/benchmarks/core-0.1/README.md).
 
 ## Approved whole-packet requirements
 
@@ -27,8 +28,8 @@ never verifies whole-packet behavior. See the requirements trace note.
 Additional design contracts: L2-ADM-008 defines admission/evidence below;
 L2-BUD-008 defines budget, cancellation and reuse; L2-WHOLE-008 defines atomic
 complete-packet delivery and optional streaming. All three trace to L1-CORE-002
-and L1-CORE-004. Tests below are L3 implementation obligations, **not passing
-checks**. No other clause, including uncapped default recovery, is relaxed.
+and L1-CORE-004. Tests below are obligations; execution/credit belongs to the
+coverage audit and exact-head CI, not this design text. No other clause, including uncapped default recovery, is relaxed.
 Owner approval of requirements does not authorize a release or publication.
 
 **Owner sign-off, 2026-11-25 (answer A to #17 item 7):** L2-ADM-008,
@@ -39,13 +40,14 @@ explicit coalescing under a raised B; ordinary one-block packets are already
 contiguous. The direct-read/allocation/borrowing contract below is also an owner
 requirement, not a measured 0.2 performance claim.
 
-Planned API boundary: the shared PacketReader framing engine gains an explicit
-whole-packet mode configured with a non_exhaustive resource policy and shared
-budget handle. It returns PacketBuf ownership plus header/ranges/offset, soft
-violation and authorization evidence; borrowed views expose complete spans and
-DATA ranges. Tail/NoCompletePacket and non-size-error rules remain typed and terminal. Builder
-constructors select SeekChecked or StreamOptIn; existing bounded-prefix callers
-keep their contract. Exact method names are deferred to the implementation review.
+API boundary: WholePacketReader uses the shared framing engine with explicit
+WholePolicy and BlockPool. Reusable PacketBuf exposes complete header/ranges/
+offset/admission and borrowed contiguous()/frame_spans()/data_spans() views.
+stream() accepts Read; seek_checked() requires StableSource. Builder policy never
+infers edition. H/B/target whole refusals retain the checked primary for explicit
+drain/stop; other errors/tails terminate. next_chunks is explicit fixed-memory
+provisional delivery, and coalesce_until is an explicit old+new budgeted copy.
+[API](api.md) and [streaming](streaming.md) define their implemented contracts.
 
 ## Limits and admission (L2-ADM-008)
 
@@ -180,7 +182,8 @@ wording in #18, implementing the owner's zero-steady-state-allocation direction.
 Live worker-owned blocks are
 not idle and remain charged until returned. Keep metadata/control overhead
 bounded and measured so the 4 MiB idle payload footprint plus process baseline
-fits comfortably below the isolated 32 MiB tiny-input RSS ceiling.
+leaves headroom beneath the tightened 12 MiB whole-mode small-case gate;
+allocator/process overhead and post-burst residency remain qualified in the audit.
 
 At default B the pool admits **at most 511 one-block packets**, including idle
 and worker-held blocks, after its control/lease metadata charges. A maximum setup
@@ -374,7 +377,7 @@ Platform sources: [Linux overcommit accounting](https://www.kernel.org/doc/html/
 and [Windows page states](https://learn.microsoft.com/en-us/windows/win32/memory/page-state).
 No settings, overcommit policy or process limits are changed by this design.
 
-## Required L3 controls and subsequent slices
+## Required L3 controls
 
 | Control | Oracle / falsifying regression |
 | --- | --- |
@@ -387,154 +390,42 @@ No settings, overcommit policy or process limits are changed by this design.
 | L3-ADM-008 | Real oversoft packet below/exactly/above H; valid/invalid/short next header; false checksum-valid payload header; seek restoration across buffering and recovery; final EOF and nonseek opt-in/refusal. Whole bytes and authorization evidence checked independently. |
 | L3-SETUP-008 | At built-in H = 128 MiB and B = 256 MiB, a complete 128 MiB setup packet (P = H) is accepted with the default block-based representation; coalescing it under default B returns typed BudgetTooSmall without waiting, including with all other buffers returned. Contiguous coalescing/Vec requires B >= 2 x 128 MiB + overhead via caller override, or consume spans. Same size ordinary type needs NextHeader, Unconfirmed(ExactEof) or StreamOptIn; H=64 MiB refuses. Trimmed capacity returns after ownership is released. |
 | L3-BUD-008 | Instrument all live credits/capacity and transient workspace. Gate a worker with bounded handshakes: explicit-deadline checkout waits at budget, no new growth; releasing capacity wakes/completes. A packet that exceeds the entire reclaimed B (including scratch/workspace) errors or reports drain without waiting; exact-fit boundaries include overhead. BudgetUnavailable requires provable absence of outstanding returners, never thread inference; explicit try-acquire returns WouldBlock on contention. Absolute-deadline waits test expiry with retained same-thread resources, spurious wakeups and reuse after timeout. Cancel with idle blocks must clear storage/credits. Test completion channels/joins are bounded independently of operation deadlines. Cancellation, retained idle slots, multiple readers and blocked merger cannot deadlock. |
-| L3-RSS-008 | GNU time wraps prebuilt core-only probe, generation/compilation outside measurement. Cold-construction and lazily warmed tiny bogus-input tests retain the 32 MiB ceiling: assert zero construction payload blocks and idle <= 8 after a large-return/pressure trim event, and measure process baseline plus at most 4 MiB idle payload, control storage and allocator margin; true oversize acceptance gets an explicitly larger justified ceiling. Budget-pressure run bounds touched peak to configured budget plus measured fixed margin. No raising the old capture-path gate to hide a regression. |
+| L3-RSS-008 | GNU time wraps prebuilt core-only probe, generation/compilation outside measurement. Cold-construction and lazily warmed tiny bogus-input tests use the tightened 12 MiB whole-mode ceiling: assert zero construction payload blocks and idle <= 8 after a large-return/pressure trim event, and measure process baseline plus at most 4 MiB idle payload, control storage and allocator margin; true oversize acceptance gets an explicitly larger justified ceiling. Budget-pressure run bounds touched peak to configured budget plus measured fixed margin. No raising the old capture-path gate to hide a regression. |
 | L3-PLAT-008 | Allocation counters plus Linux touched RSS and Windows commit/working-set evidence; 32-bit checked limits. Controls once with touched preallocation and unbudgeted-retention mutants, then discard mutants. Reserved-but-unwritten memory can evade RSS, so request/accounting assertions are mandatory. |
 
-All rows are implementation obligations, including true oversize acceptance;
-this docs-only update cannot pass them by measuring 0.1. Existing isolated RSS stays
-unchanged. Absolute OS survival cannot be unit-tested or promised.
+All rows are implementation obligations; [the coverage audit](coverage-0.2.md)
+records scoped executions and residual gaps. Existing capture RSS stays unchanged;
+whole small cases use the later tightened 12 MiB gate. Absolute OS survival cannot
+be unit-tested or promised.
 
-After this owner-alignment docs PR merges: (2) budget/storage primitives, 512 KiB blocks and accounting/default tests;
-(3) admission/seek evidence and EOF tests; (4) incremental whole-packet reader;
-(5) pool reuse/trim and metadata inspection; (6) ordered consumer examples and
-optional streaming contract; (7) RSS/allocation/platform controls and performance
-comparison. Keep each review around 300–600 lines; split rather than omit tests.
-No SIMD/async/no_std/publishing work is authorized by this design.
+## Implementation and release boundary
 
-## Slice 2 implementation boundary
+The planned slices and owner-approved additions are implemented: pool/storage,
+admission/whole assembly, hybrid/adaptive reads, metadata inspection and ordered
+examples, resource/platform qualification, admission counters, coalescing,
+packet-data checksums, positioned explicit drain and provisional chunks. See the
+verification-v02-* ledgers for historical tests-first/review/mutant evidence;
+earlier 'later slice' statements there describe that slice only.
 
-[Slice-2 evidence](verification-v02-s02.md) covers the shared block pool and
-exclusive assembly/storage permits. Ordinary block Drop only recycles; the
-future packet owner calls trim_after_return with its actual returned block count,
-not the declared length. Counts above eight trim; an explicit pressure call is
-the other trigger. Whole-packet assembly/valid-byte views, hard/soft admission,
-source-stability checks, direct I/O and coalescing remain later slices.
+Owner Q7/Q8 (2026-11-28) fixes checksum default ON with opt-out and positioned
+H/B/target refusals. Retry re-evaluates the same checked frame; a log-and-continue
+loop spins unless it explicitly drains/stops (or selects authorized fixed chunks).
+All reports retain recovery; there is never automatic fallback or body rescan.
 
-After a burst, idle storage can stay up to the caller's accounted budget B
-(at default B, about **511 blocks / 256 MiB resident**) until a large packet returns
-and its owner calls trim_after_return(), or trim_for_pressure() is called.
-**Nothing trims automatically.** Retention never exceeds the caller's budget;
-callers wanting lower residency choose a lower budget at construction or call
-trim. Process/allocator overhead remains outside the accounted block budget.
-This is the coordinator-accepted hysteresis tradeoff, not a promise of 4 MiB idle
-storage after every burst.
+Coalescing may run concurrently with assembly using shared returnable credits.
+Only block-credit waiters get priority, not readers queued for assembly; WouldBlock
+never evicts warm idle blocks. Maximum-setup default coalescing refuses; raised B
+or borrowed spans are explicit alternatives.
 
-## Slice 3 integration boundary
+Chunk transfer uses fixed charged 4 KiB scratch plus 1,024-byte control allowance,
+no packet blocks/assembly/credit wait. Begin/Chunk/Abort callbacks are provisional;
+only returned End commits, with incremental default-ON checksum and secondary
+integrity/admission evidence. It never produces PacketInfo/inventory credit.
+Errors preserve received/offered/acknowledged progress and both sink causes;
+known-stable-short input retains truncation-only handling with no Begin.
 
-The [slice-3 evidence](verification-v02-s03.md) describes admission/EOF checks and
-the minimal direct-read whole-frame entry path requested with this assignment.
-This also brings forward part of the planned slice-4 incremental implementation.
-The caller reuses PacketBuf descriptors and moves buffer ownership to workers;
-reader/buffer workspace is charged to B and frozen during an active assembly.
-Coalescing, opt-in drain/chunk modes and broader resource/performance qualification
-remain later slices; no requirement or default has been relaxed.
-
-The prior slice-3 8 KiB recovery-only scratch/direct-body strategy is superseded
-by the 2026-11-26 owner-approved hybrid above. Probe/cursor, typed completion,
-zero-allocation and memory limits are preserved. See
-[hybrid verification](verification-v02-hybrid.md) for current evidence.
-
-
-## Slice 5 integration boundary
-
-Pool reuse/trim was implemented with the storage and whole-packet slices; this
-slice adds the metadata-only inspection bridge and end-to-end worker evidence.
-Observe accepted PacketInfo once on the ordered path before moving PacketBuf
-ownership to workers. Existing inspection entry limits, terminal status, recovery
-uncertainty and per-channel sequence rules are shared with capture mode. Consumer
-inventory maps remain separately entry-bounded, not charged to the input pool B.
-
-The worker test covers 16 retained ordinary buffers, a nine-block setup return
-that trims idle storage to eight, and zero-allocation bursts after re-warm. It
-pins the agreed hysteresis without changing it. The exact-cutoff refill boundary
-is also pinned; no geometric refill strategy is introduced. See
-[slice-5 evidence](verification-v02-s05.md).
-
-Next is slice 6's ordered consumer examples/optional streaming contract, then
-slice 7's resource/platform/performance qualification. Explicit coalescing and
-opt-in drain/chunk delivery remain unimplemented; this metadata bridge does not
-claim those obligations or full 0.2 qualification.
-
-
-## Slice 6 consumer boundary
-
-The [ordered example and optional streaming contract](streaming.md) demonstrate
-complete-packet ownership fan-out, ordered inspection/control notifications,
-bounded return queues and safe shutdown with the existing API. Begin/Chunk/End/
-Abort and explicit drain are documented contracts only; their delivery APIs,
-coalescing and slice-7 resource/platform qualification remain outstanding.
-No inventory admission counters or geometric refill strategy are introduced.
-See [slice-6 evidence](verification-v02-s06.md).
-
-
-## Slice 7 qualification boundary
-
-[Resource/platform/performance evidence](verification-v02-s07.md) adds isolated
-whole-reader RSS/Windows commit gates, executed 32-bit limits and a larger existing
-informational benchmark. The capture RSS gate and approved read policy remain
-unchanged. Chunk/drain/coalescing and inventory admission counters remain outside
-this assignment with the owner; this qualification does not claim RC readiness.
-
-
-## Owner decisions 2026-11-26: remaining 0.2 features
-
-Decision 3A approves aggregate admission-evidence inventory counters, implemented
-with explicit coverage and transactional checked arithmetic; see
-[verification](verification-v02-admission-counts.md). Decision 4B confirms explicit
-budgeted coalescing, drain and chunk delivery are all required for 0.2, opt-in and
-reported, with cancellation/deadlines and no credit cycles. Implement each in its
-own reviewed PR in that order after counters. Their implementation remains
-outstanding here; approval is no longer pending. No release is authorized.
-
-
-## Explicit coalescing implementation boundary
-
-[Coalescing evidence](verification-v02-coalescing.md) covers opt-in owned copies,
-old+new accounting, concurrent reader/copy credit admission without credit waits,
-priority only for block-credit waiters (WouldBlock without idle eviction),
-not readers queued for the assembly permit,
-side-effect-free WouldBlock, deadline/cancel rollback and
-max-setup default refusal/raised-budget acceptance. Separate coalesced credits
-are returnable and do not make later frame feasibility permanently fail. The next
-approved feature is whole-mode incremental data-checksum verification, default ON
-with explicit opt-out, then reported drain and callback-scoped chunk delivery.
-Those features are not implemented by this coalescing PR; no release is implied.
-
-
-Explicit drain is now implemented separately from parked checksum PR #29; see
-[drain contract and evidence](verification-v02-drain.md). It is an explicit
-omission with fixed charged scratch, typed disposition/progress, cooperative
-cancellation/deadlines and no whole-admission or inventory credit. Callback chunk
-delivery remains the next separate implementation.
-
-
-Owner Q7/Q8, 2026-11-28: packet-data checksum verification is ON by default with
-an opt-out (#29 merged). Choose drain option A, with no automatic WholePolicy
-mode: H/B/target whole-delivery refusals retain one validated header/ranges and
-recovery at logical offset+24. The caller may explicitly drain that frame or
-stop; retrying whole delivery retries the same frame. Other failures stay terminal.
-Read-ahead and the retained header are fixed charged metadata/storage; no source
-rewind, body allocation or silent discard occurs on refusal. Tests cover H/B
-refusal→drain→next frame, stop/no automatic drain, recovery retention and the
-full target-limit path on i686 with a CI-only synthetic 4 GiB drain.
-
-
-## Final feature: explicit chunk implementation
-
-The [callback-scoped protocol](streaming.md#explicit-callback-scoped-chunk-delivery)
-is implemented by next_chunks as a separate opt-in mode. Begin/Chunk/Abort are
-callbacks; the returned End alone commits. A fixed 4 KiB charged scratch plus
-1,024 bytes of fixed control workspace require no packet blocks/assembly or
-credit waits. Whole-frame B/isize allocation limits do not apply to streaming
-storage; H, soft authorization and stable-source guarantees still apply. End
-reports Q7 incremental checksum verification (default ON, opt-out available),
-secondary integrity and admission, but is never PacketInfo/Inspection input.
-Q8 whole-size refusal can be followed by explicit chunk transfer if authorized,
-or explicit drain. Known-short stable input keeps truncation-only handling.
-
-Earlier slice-boundary statements above are historical snapshots: counters,
-coalescing, checksum verification, drain and chunk delivery are now implemented
-in their respective PRs, subject to exact-head review/CI; no release is implied.
-See [chunk evidence](verification-v02-chunks.md). Async scheduling, transport
-reassembly, semantic setup/time closure and decoder transaction rollback remain
-orchestrator responsibilities. No read-policy or geometric-refill change is made.
+Version 0.2.0 is a prepared candidate, not permission to release. The dependency
+remains published types ^0.1; no types 0.2 prerequisite. Payload semantics,
+semantic setup/time closure, async scheduling, UDP reassembly, decoder rollback,
+no_std/alloc, size classes and geometric-refill exploration remain outside this
+release. No new runtime strategy or policy is introduced by release preparation.

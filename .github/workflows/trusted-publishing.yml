@@ -88,6 +88,13 @@ jobs:
           RUSTDOCFLAGS='-D warnings' cargo +"$RELEASE_RUST_VERSION" doc --workspace --locked --no-deps
           python3 scripts/test_workspace.py
           python3 scripts/test_rss_probe.py
+          python3 scripts/test_whole_resources.py
+          cargo +"$RELEASE_RUST_VERSION" test -p irig106-core --test whole --locked maximum_setup_fits_default_h_and_b -- --ignored --exact
+          cargo +"$RELEASE_RUST_VERSION" test -p irig106-core --example ordered --locked
+          cargo +"$RELEASE_RUST_VERSION" build -p irig106-core --example ordered --locked
+          python3 scripts/test_ordered_example.py target/debug/examples/ordered
+          cargo +"$RELEASE_RUST_VERSION" build -p irig106-core --example whole_resources --release --locked
+          python3 scripts/check_whole_resources.py target/release/examples/whole_resources
           cargo +"$RELEASE_RUST_VERSION" build -p irig106-core --example inspect --locked
           python3 scripts/test_inspect_example.py target/debug/examples/inspect
           df -h .

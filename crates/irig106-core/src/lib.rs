@@ -1,10 +1,11 @@
 //! Structural parsing for IRIG 106 Chapter 10 recordings.
 //!
-//! Primary framing and bounded streaming capture using the 106-24R1 layout.
-//! Includes typed completion/errors, optional recovery limits, secondary checksum
-//! evidence, trailer ranges, bounded header inventory and per-channel sequence
-//! comparisons. No payload meaning or
-//! full recording validation.
+//! Primary framing, retained bounded capture and whole-packet ownership using
+//! the 106-24R1 layout. Whole delivery uses receive-driven pooled blocks, explicit
+//! size admission, shared budgets and default-ON packet-data checksums. Optional
+//! coalescing, drain and provisional callback chunks never happen as fallback.
+//! Typed completion/recovery, secondary evidence, bounded inventory and sequence
+//! comparisons do not interpret payloads or establish full recording conformance.
 //!
 //! A payload consumer can request a bounded prefix and check completeness before
 //! decoding. The following independent frame declares four DATA bytes:
@@ -19,6 +20,22 @@
 //!     _ => panic!("fixture must deliver complete DATA"),
 //! }
 //! # Ok::<(), irig106_core::Error>(())
+//! ```
+
+//! Whole delivery is an explicit alternative to capture. Reuse the owning buffer
+//! and borrow its spans; default limits do not preallocate declared lengths:
+//! ```
+//! use irig106_core::{BlockPool, PacketBuf, WholeEvent, WholePacketReader, WholePolicy};
+//! use std::time::{Duration, Instant};
+//! let bytes = [0x25,0xEB,0,0,28,0,0,0,4,0,0,0,0,0,0,9,0,0,0,0,0,0,0x45,0xF4,1,2,3,4];
+//! let pool = BlockPool::with_defaults()?;
+//! let mut packet = PacketBuf::new(pool.clone())?;
+//! let mut reader = WholePacketReader::stream(&bytes[..], WholePolicy::new(), pool)?;
+//! let event = reader.next_packet_into(&mut packet, Instant::now() + Duration::from_secs(1))?;
+//! assert!(matches!(event, Some(WholeEvent::Packet)));
+//! assert_eq!(packet.contiguous().unwrap(), &bytes);
+//! assert_eq!(packet.data_spans().next().unwrap(), &[1,2,3,4]);
+//! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
 #![forbid(unsafe_code)]

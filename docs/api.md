@@ -1,16 +1,16 @@
-# Core 0.1 development API contract
+# Core 0.2 API contract
 
-**Implemented in slice 2:** `Header::parse(&[u8])`, `primary_checksum(&[u8; 24])`,
+**Primary and retained capture API:** `Header::parse(&[u8])`, `primary_checksum(&[u8; 24])`,
 `HeaderError`, `PRIMARY_HEADER_LEN` and re-exported shared `Rtc`. `Header` stores
 immutable primary bytes and exposes accessors named below (`channel()`, etc.).
-**Slice 4** returns `Result<_, Error>` from reader construction/iteration.
+The capture reader returns `Result<_, Error>` from reader construction/iteration.
 `Error.reason: ErrorKind` distinguishes I/O, HeaderError, NoCompletePacket,
 RecoveryLimit, invalid buffer/capture bounds, allocation and offset overflow.
 Errors retain consumed `position`, optional `recovery`, and their original source.
 `kind()`/`get_ref()` retain broad seed classifications and HeaderError downcasts.
 NoCompletePacket carries optional `Tail` metadata; Event::Tail adds recovery.
-Slice 5 makes Error, Recovery, Tail, ReaderLimits, Packet, SecondaryIntegrity,
-and PacketRanges non-exhaustive; Event::Tail is a non-exhaustive variant.
+Error, Recovery, Tail, ReaderLimits, Packet, SecondaryIntegrity,
+and PacketRanges are non-exhaustive; Event::Tail is a non-exhaustive variant.
 Construct limits with ReaderLimits::new()/Default and with_buffer_bytes,
 with_capture_bytes, with_recovery_bytes builders. Other evidence is read through
 fields or patterns containing `..`; consumers cannot construct struct literals.
@@ -20,7 +20,8 @@ so consumers can match `ErrorKind::Header { source, .. }`. Non-exhaustive tuple
 variants would be private to external matching in Rust. ErrorKind Display
 includes NoCompletePacket tail kind/bytes/offset; Error Display appends recovery
 start/scanned bytes when present. Typed sources and classifications are unchanged.
-All errors/tails terminate iteration; repeated calls yield None. This is framing
+Capture errors/tails terminate iteration; repeated calls yield None. Whole-mode
+H/B/target size refusals alone are positioned and nonterminal (see below). This is framing
 completion, not full packet/recording conformance. Behavior follows
 [requirements](requirements.md).
 
@@ -39,7 +40,7 @@ Event::Tail { offset, bytes, kind, recovery, .. } // pattern, not construction
 The synchronous std-first adapter sits above pure header/checksum functions.
 The sole dependency is published irig106-types 0.1, default features off;
 no time, TMATS, decode or retired-reader dependency. No supported no_std/alloc
-configuration in 0.1; keep parsing and I/O separate for later consumers.
+configuration in 0.2; keep parsing and I/O separate for later consumers.
 
 `Header` retains channel, Packet/Data Length, data-type version, sequence, flags,
 data type and raw RTC bytes; a shared `Rtc` accessor avoids a competing counter.
@@ -108,13 +109,14 @@ truncated secondary headers before inspection. It reports reserved bytes 8–9,
 not format-dependent bits inside the time value. Time consumers determine which
 time answers remain usable; RDG-008's interpretation status is unchanged.
 
-Trailer widths/ranges are checked, but packet-data checksum contents are
-`NotChecked` in 0.1 (or absent when flags select no checksum), never `Valid`.
+In retained capture mode trailer widths/ranges are checked, but contents stay
+NotChecked (or Absent when flags select no checksum). Whole/chunk delivery
+verifies by default, as described below.
 Packet.ranges exposes packet-relative u32 ranges for DATA, filler and checksum.
 Widths from flag bits1–0 are 0/1/2/4; overlaps/insufficient space are fatal typed
 HeaderError before capture. Variable filler is allowed to preserve per-channel
 packet size (§11.2.1.4); filler byte values are not checked. Checksum contents are
-DataChecksumState::Absent or NotChecked, never Valid. No payload meaning,
+Absent or NotChecked in capture; whole/chunk may report Verified/Mismatch. No payload meaning,
 secondary time conversion, calendar policy or TF codes move.
 
 The optional inspection accumulator has explicit channel/row caps and checked
@@ -176,18 +178,19 @@ estimate or severity is assigned. See [migration](migration.md) and its examples
 
 ## Verification and release boundary
 
-The virtual-workspace library targets the 0.1.0 release. CI checks
-the exact crate file list and runs cargo package with archive verification; the
-inspect example executes against piped fixtures. A separate Linux CI job measures
-only the prebuilt release core driver using GNU time, outside fixture generation
-and compilation, with a 32 MiB peak-RSS ceiling. The input includes a complete
-64 MiB packet with 4-byte capture (L1-CORE-002) and 48 MiB mid-file recovery
-(L2-REC-003), plus dense small packets and padding. See [slice 8](verification-s08.md)
-for input parameters and negative control. These checks do not establish whole
-recording conformance, validate payload/checksum contents, or authorize release.
-The Trusted Publishing pipeline keeps publication separately authorized.
+The 0.2.0 candidate has complete-only whole delivery, retained capture and explicit
+coalescing/drain/chunk modes. See [the full coverage audit](coverage-0.2.md) for
+L1/L2/L3 mappings, tested scopes and outstanding verification. CI checks the exact
+package list, compiled packaged source, runnable inspect/ordered examples, MSRV,
+64-bit Linux/macOS/Windows memory and executed Windows i686 functional cases.
+Capture keeps its 32 MiB RSS gate; whole small cases use 12 MiB with separate
+large/pressure ceilings. Benchmarks are informational generated warm-cache data.
+No whole-recording/payload conformance or universal memory/performance claim.
+The Trusted Publishing Build repeats Linux qualification before packaging, and
+the unsigned publish-path job compares the frozen candidate and pinned 0.0.1
+known-good fixture. Passing a PR dry run does not sign, publish or authorize a tag.
 
-## 0.2 development: storage primitives (slice 2)
+## Shared storage (0.2)
 
 BlockPool::with_defaults() uses B = 256 MiB; new(bytes) is fallible. Construction
 reserves charged control descriptors, with zero 512 KiB payload blocks.
@@ -220,10 +223,10 @@ call trim for lower residency. Process/allocator overhead is outside this budget
 PoolError
 preserves typed budget/allocation/synchronization failures; PoolStats is accounted
 storage, not RSS. No new dependencies or unsafe library code. See
-[slice-2 evidence](verification-v02-s02.md) for partial requirement coverage;
-these primitives do not yet supply packet admission, valid-byte assembly or I/O.
+[slice-2 evidence](verification-v02-s02.md) for historical scope;
+WholePacketReader integrates these primitives with packet admission and I/O.
 
-### Unreleased whole-packet integration (0.2 slice 3)
+### Whole-packet delivery (0.2)
 
 `WholePolicy::new()` selects explicit 106-24R1 thresholds, H=128 MiB, no recovery
 cap, and legacy/stream oversoft allowances off. H is independent of the B selected
@@ -243,7 +246,8 @@ metadata is available through `buf.info()` and bytes through `contiguous()` (one
 block), `frame_spans()` or `data_spans()`. Spans borrow the buffer; workers move
 buffer ownership and return the same descriptors for reuse. Before each call,
 the previous frame is returned. No partial frame survives EOF/error as a packet.
-A terminal tail/error is followed by None, preserving 0.1 completion semantics.
+A tail or non-size error is followed by None; H/B/target size refusals instead
+retain the checked primary for explicit drain/stop (Q8 below).
 Wait deadlines bound pool waits, not a blocking source's Read/Seek.
 DeadlineExceeded or Cancelled from next_packet_into is terminal: the header and
 possibly body bytes have already been consumed, PacketBuf is cleared, and calling
@@ -294,8 +298,9 @@ lookahead never advances logical offsets/recovery. Known short stable input drai
 to EOF with fixed scratch and emits a truncation, not a complete prefix.
 Slice-3 evidence predates data-checksum verification; the current whole-mode
 checksum contract is below. Capture remains NotChecked.
-Explicit coalescing, drain/chunk delivery, broader platform/RSS controls and
-performance comparison remain later slices. See [slice-3 evidence](verification-v02-s03.md).
+Explicit coalescing, drain/chunk delivery and platform/performance qualification
+are implemented separately below; [slice-3 evidence](verification-v02-s03.md)
+records only that earlier slice, not the final coverage boundary.
 
 Exact-EOF's immediate pre-admission stamp recheck can catch a change between
 metadata queries; it does not protect the later read interval. The post-body
@@ -310,7 +315,7 @@ and recovery refills still use full capacity. Body-copy selection, allocation,
 limits and public policy defaults are unchanged. See
 [adaptive-refill evidence](verification-v02-adaptive.md).
 
-### Unreleased whole-packet inventory (0.2 slice 5)
+### Whole-packet inventory (0.2)
 
 `Inspection::observe_packet_info(buf.info().unwrap())` accepts a complete whole
 packet's metadata and returns the same `SequenceObservation` as the capture-event
@@ -333,14 +338,15 @@ Ordinary returns retain the warmed high-water storage; a rare large return or
 explicit pressure trim can require re-warm before that guarantee resumes. See
 [slice-5 evidence](verification-v02-s05.md).
 
-### Ordered consumer and optional delivery contract (0.2 slice 6)
+### Ordered consumers and optional delivery (0.2)
 
 The executable `ordered` example moves complete owning buffers through bounded
 channel-affine workers, with inspection/control notifications on the producer.
 See [the consumer/streaming contract](streaming.md) for setup/time ordering,
-credit-return/shutdown rules, live-input limits and the proposed provisional
-Begin/Chunk/End/Abort protocol. Only the whole-packet example is implemented;
-no new streaming API or inventory admission counters are introduced.
+credit-return/shutdown rules, live-input limits and implemented explicit
+next_chunks protocol (Begin/Chunk/Abort callbacks, returned End). Admission and
+checksum counters below cover complete observations only; chunks/drains never
+fabricate PacketInfo or complete-recording inventory credit.
 
 
 ### Admission-evidence inventory (owner 2026-11-26, decision 3A)

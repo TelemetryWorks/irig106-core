@@ -1,21 +1,12 @@
-# Core requirements: implemented 0.1 and approved 0.2
+# Core requirements: retained capture and 0.2 delivery
 
-Owner approved 2026-11-22; recovery correction from the coordinator is binding.
-Slice 2 supplies primary-header/checksum/basic-length tests and shared `Rtc`.
-Slice 4 adds typed completion, optional recovery caps and terminal evidence,
-including checked offset-overflow unit coverage. See [slice 2](verification-s02.md),
-[slice 3](verification-s03.md) and [slice 4](verification-s04.md) clause evidence.
-Slice 5 adds secondary checksum/reserved evidence and trailer ranges; see
-[clause evidence](verification-s05.md). Slice 6 adds bounded inventory/presence facts ([evidence](verification-s06.md));
-slice 7 adds per-channel sequence observations and the consumer migration contract
-([evidence](verification-s07.md)). Slice 8 adds CI-only isolated RSS regression
-evidence, exact package inventory and archive verification
-([evidence](verification-s08.md)). Allocation-failure
-handling is typed but no process-OOM test is claimed. No whole-recording or
-whole-standard conformance is asserted.
-
-Slice 9 supplies the base release pipeline and unsigned Publish path dry run
-([evidence](verification-s09.md)); this is adoption preparation, not publication.
+0.2.0 release-candidate scope includes all planned whole-packet features while
+preserving the 0.1 capture contract. [The coverage audit](coverage-0.2.md) maps
+every core L1/L2/L3 row to implementation, tests and scoped evidence, and records
+partial/unverified obligations. Historical slice ledgers remain unchanged; an
+implemented feature is not a blanket verified-conformance claim. Source inspection,
+executed checks and contract/OS limits are distinct. No release/tag/publication
+is authorized by this document.
 
 Sources: **S** = 106-24R1 Chapter 11 §§11.2.1.1–11.2.1.2, as recorded in
 [time's reviewed evidence](provenance.md); **O** = owner/coordinator policy
@@ -29,8 +20,8 @@ Owner decisions **2026-11-25** approve the whole-packet wording below and align
 [design-0.2.md](design-0.2.md): built-in H = 128 MiB / B = 256 MiB, independently
 overridable; stable exact-EOF admission labelled `Unconfirmed(ExactEof)`; and a
 non-default explicit legacy setup allowance for type 0x01 on any channel.
-These are approved requirements, **not implemented or verified features**.
-Whole-packet slice 2 starts in a separate PR after this docs update merges.
+These approved requirements are implemented for 0.2; see the coverage audit
+for clause-scoped evidence and remaining limitations, not an all-passed claim.
 
 **Owner sign-off, 2026-11-25, answer A:** L2-ADM-008, L2-BUD-008 and
 L2-WHOLE-008 are approved in full, including reported opt-in drain/chunk modes
@@ -93,7 +84,8 @@ explicitly accepts this change to the approved L3-HOT/DEFAULT/RSS wording in #18
 implementing the owner's zero-steady-state-allocation direction.
 Do not eagerly fill the idle baseline. Together
 with measured process/control/allocator overhead, this small baseline must fit
-under the isolated tiny-input 32 MiB RSS ceiling.
+under the current isolated whole-mode small-case 12 MiB ceiling (the older
+32 MiB threshold is retained only for capture).
 
 Default B admits at most **511 one-block packets**, including idle and worker-held
 blocks, after pool control/lease charges. A maximum setup uses 256 blocks, leaving
@@ -187,12 +179,12 @@ Coverage is clause-scoped in the slice evidence; planned probes are not passes.
 | L3-PKG-007 → L2-PKG-007 | Metadata, registry-only dependency/default-feature boundary and package file checks; CI builds archived source. Header integration tests use the shared Rtc directly. |
 | L3-REL-007 → L2-REL-007 | Exact-head CI/review ledgers and unsigned publishing-path dry run in slice 9. Cryptographic/registry mutation paths have mocked controls; real release remains separately authorized. |
 
-### Whole-packet L3 obligations (0.2; not yet executed)
+### Whole-packet L3 obligations (0.2)
 
 These obligations include the owner-required default, exact-EOF/mutation and
 legacy-allowance tests. They belong to the corresponding implementation slices;
-this docs-only PR adds no runtime API or passing-test claims. Full behavior and
-source references are in [the design](design-0.2.md).
+the implementation and verification scope are mapped in [the audit](coverage-0.2.md).
+Full behavior and source references are in [the design](design-0.2.md).
 
 | ID → L2 parent | Oracle and required probes |
 | --- | --- |
@@ -207,7 +199,7 @@ source references are in [the design](design-0.2.md).
 | L3-DRAIN-013 → L2-WHOLE-008, L2-CAP-002@whole-0.2, L2-BUD-008 | Explicit omission only; report reason/declared and consumed bytes/recovery/disposition, no complete PacketInfo. Fixed charged scratch, no assembly/credit cycles or declared-length allocation; preserve pending read-ahead and exact next boundary. Positioned H/B/target refusal then explicit drain and next packet; refusal then stop/no automatic drain; retained recovery/header and ~4 GiB short claims, Interrupted/operational failures, recovery limits, cancellation/deadlines including recovery/retries, source mutation and nested syncs in truncated bodies. Errors/EOF terminal; success/error allocator oracle and 64 MiB all-OS drain under 12 MiB gate. |
 | L3-CHUNK-014 → L2-WHOLE-008, L2-BUD-008, L2-CHK-012 | Explicit fixed-budget callback borrows; provisional Begin/Chunk/Abort, returned End only after full frame/checks/acknowledgement. Independent patterned byte/DATA-range and checksum oracles at all widths/secondary/filler; short/Interrupted input, recovery, restored probe with pending read-ahead, exact EOF, known-short truncation-only, stream opt-in/refusal, positioned size refusal and 32-bit huge short claims. Source mutation, cancellation, deadline, I/O and sink errors prevent End; preserve original and Abort sink errors and received/offered/acknowledged progress. No PacketInfo or inventory admission; callback borrows cannot escape. Zero transfer/error allocations and zero blocks under active full pool; 64 MiB synthetic chunks with B = 4 MiB stay under the all-OS 12 MiB gate. |
 | L3-BUD-008 → L2-BUD-008 | Instrument all live credits/capacity and transient workspace. Gate a worker with bounded handshakes: explicit-deadline checkout waits at budget, no new growth; releasing capacity wakes/completes. A packet that exceeds the entire reclaimed B (including scratch/workspace) errors or reports drain without waiting; exact-fit boundaries include overhead. BudgetUnavailable requires provable absence of outstanding returners, never thread inference; explicit try-acquire returns WouldBlock on contention. Absolute-deadline waits test expiry with retained same-thread resources, spurious wakeups and reuse after timeout. Cancel with idle blocks must clear storage/credits. Test completion channels/joins are bounded independently of operation deadlines. Cancellation, retained idle slots, multiple readers and blocked merger cannot deadlock. |
-| L3-RSS-008 → L2-IO-002@whole-0.2, L2-BUD-008 | GNU time wraps prebuilt core-only probe, generation/compilation outside measurement. Cold-construction and lazily warmed tiny bogus-input tests retain the 32 MiB ceiling: assert zero construction payload blocks and idle <= 8 after a large-return/pressure trim event, and measure process baseline plus at most 4 MiB idle payload, control storage and allocator margin; true oversize acceptance gets an explicitly larger justified ceiling. Budget-pressure run bounds touched peak to configured budget plus measured fixed margin. No raising the old capture-path gate to hide a regression. |
+| L3-RSS-008 → L2-IO-002@whole-0.2, L2-BUD-008 | GNU time wraps prebuilt core-only probe, generation/compilation outside measurement. Cold-construction and lazily warmed tiny bogus-input tests use the tightened 12 MiB whole-mode ceiling: assert zero construction payload blocks and idle <= 8 after a large-return/pressure trim event, and measure process baseline plus at most 4 MiB idle payload, control storage and allocator margin; true oversize acceptance gets an explicitly larger justified ceiling. Budget-pressure run bounds touched peak to configured budget plus measured fixed margin. No raising the old capture-path gate to hide a regression. |
 | L3-PLAT-008 → L2-IO-002@whole-0.2, L2-BUD-008 | Allocation counters plus Linux touched RSS and Windows commit/working-set evidence; 32-bit checked limits. Controls once with touched preallocation and unbudgeted-retention mutants, then discard mutants. Reserved-but-unwritten memory can evade RSS, so request/accounting assertions are mandatory. |
 
 ## Nine review slices (0.1 history)

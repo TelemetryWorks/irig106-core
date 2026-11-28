@@ -42,6 +42,21 @@ class WorkflowContract(unittest.TestCase):
         self.assertNotIn("overwrite:", self.text)
         self.assertEqual(self.text.count("environment: crates-io"), 1)
 
+    def test_candidate_build_qualifies_whole_mode_before_packaging(self):
+        """Org standard: qualification runs in Build on unsigned PR dry runs too."""
+        source = self.jobs["build"]
+        package = source.index("name: Package and verify packaged source")
+        for command in [
+            "python3 scripts/test_whole_resources.py",
+            "--test whole --locked maximum_setup_fits_default_h_and_b -- --ignored --exact",
+            "--example ordered --locked",
+            "python3 scripts/test_ordered_example.py target/debug/examples/ordered",
+            "--example whole_resources --release --locked",
+            "python3 scripts/check_whole_resources.py target/release/examples/whole_resources",
+        ]:
+            self.assertIn(command, source)
+            self.assertLess(source.index(command), package)
+
     def test_exact_job_permissions_and_dependencies(self):
         expected = {"gate": {"contents: read", "actions: read"}, "build": {"contents: read"},
                     "attest": {"contents: read", "id-token: write", "attestations: write"},
