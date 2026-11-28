@@ -66,6 +66,35 @@ jobs:
           IRIG106_SMALL_BODY_BENCH_BYTES: "33554432"
         run: cargo test --release -p irig106-core --test read_strategy_bench --locked small_body_read_strategy_benchmark -- --ignored --exact --nocapture
 
+      - name: Data-checksum cost (informational, widths 8/16/32, on/off)
+        if: matrix.os == 'ubuntu-24.04'
+        env:
+          IRIG106_SMALL_BODY_BENCH_BYTES: "33554432"
+        run: cargo test --release -p irig106-core --test read_strategy_bench --locked data_checksum_cost_benchmark -- --ignored --exact --nocapture
+
+      - name: Checksum vectorization evidence (informational)
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          cargo rustc --release --lib -p irig106-core --locked -- --emit=asm
+          python3 - <<'PYASM'
+          from pathlib import Path
+          import re
+          for path in Path("target/release").rglob("*.s"):
+              active = False
+              shown = 0
+              for line in path.read_text().splitlines():
+                  if "DataChecksum6update:" in line:
+                      active = True
+                      print("checksum assembly:", path)
+                  if active and re.search(r"\b(v?padd[bwdq]|psadbw)\b", line):
+                      if shown < 32:
+                          print(line)
+                      shown += 1
+                  if active and ".size" in line and "DataChecksum" in line:
+                      print("vector arithmetic instruction sites:", shown)
+                      break
+          PYASM
+
   contract:
     name: Workspace, lint, docs and package
     runs-on: ubuntu-24.04

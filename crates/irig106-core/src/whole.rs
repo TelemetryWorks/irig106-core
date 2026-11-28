@@ -1,6 +1,7 @@
 //! Reusable complete-frame storage and direct-read integration.
 use crate::{
     admission::{probe, seek_retry},
+    integrity::DataChecksum,
     pool::Workspace,
     reader::FrameStart,
     *,
@@ -383,7 +384,7 @@ impl<R: Read> WholePacketReader<R> {
         // Predict only header-refill size, never body delivery/copy policy.
         // No previous frame (and a previous small body) keeps full amortisation.
         let header_limit = if self.previous_large { 24 } else { usize::MAX };
-        let (offset, header, ranges) = match self.framing.find_header_limited(header_limit)? {
+        let (offset, header, mut ranges) = match self.framing.find_header_limited(header_limit)? {
             FrameStart::Header {
                 offset,
                 header,
@@ -448,6 +449,9 @@ impl<R: Read> WholePacketReader<R> {
         // Choose once for the entire body, not a short read or final fragment.
         let body = length - 24;
         let copy_body = body < self.policy.small_body || self.framing.buffered() >= body;
+        let width = ranges.checksum.len();
+        let mut checksum =
+            (self.policy.verify_data_checksum && width > 0).then(|| DataChecksum::new(width));
         let mut received = 24;
         while buf.blocks.len() < count {
             let block = assembly.next_block_until(deadline)?;
@@ -469,6 +473,17 @@ impl<R: Read> WholePacketReader<R> {
                     &mut block.storage_mut()[filled..filled + wanted],
                     copy_body,
                 )?;
+                if let Some(checksum) = &mut checksum {
+                    let lo = (header.header_length() as usize)
+                        .saturating_sub(start)
+                        .max(filled);
+                    let hi = (ranges.checksum.start as usize)
+                        .saturating_sub(start)
+                        .min(filled + n);
+                    if lo < hi {
+                        checksum.update(&block.storage()[lo..hi]);
+                    }
+                }
                 filled += n;
                 received += n;
                 if n < wanted {
@@ -485,6 +500,11 @@ impl<R: Read> WholePacketReader<R> {
         } else {
             None
         };
+        if let Some(checksum) = checksum {
+            let last = buf.blocks.last().unwrap().storage();
+            let end = (length - 1) % BLOCK_BYTES + 1;
+            ranges.data_checksum = checksum.finish(&last[end - width..end]);
+        }
         self.framing.established = true;
         self.previous_large = body >= self.policy.small_body;
         buf.info = Some(PacketInfo {
